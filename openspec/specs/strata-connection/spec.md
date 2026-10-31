@@ -9,17 +9,23 @@ results rather than crashes.
 
 ### Requirement: Reach Strata over the OpenAI-compatible API
 
-The system SHALL communicate with the local Strata inference engine using its
-OpenAI-compatible chat-completions API. The system SHALL discover the loaded
-model's identifier from Strata's model-listing endpoint rather than accepting a
-caller-supplied model, because Strata serves one loaded model and does not
-hot-swap.
+The system SHALL communicate with the local inference engine using its
+OpenAI-compatible chat-completions API. The system SHALL discover the available
+model identifiers from the model-listing endpoint. When the caller does not
+choose a model, the system SHALL use the first discovered model.
 
 #### Scenario: Completion request uses the discovered model
 
-- **WHEN** the system sends a completion request to Strata
-- **THEN** the request targets the OpenAI-compatible endpoint using the model
-  identifier discovered from Strata, without the caller choosing a model
+- **WHEN** the system sends a completion request and the caller has not chosen a
+  model
+- **THEN** the request targets the OpenAI-compatible endpoint using the first
+  model discovered from the model-listing endpoint
+
+#### Scenario: Multiple available models are all discoverable
+
+- **WHEN** the model-listing endpoint returns more than one model
+- **THEN** the system makes the full list of model identifiers available rather
+  than only the first
 
 ### Requirement: Connection settings come from configuration
 

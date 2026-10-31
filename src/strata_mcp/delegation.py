@@ -18,7 +18,7 @@ from strata_mcp.errors import (
 )
 from strata_mcp.mapping import error_result, status_from_output
 from strata_mcp.prompt import build_system_prompt
-from strata_mcp.result import WorkerResult, WorkerStatus
+from strata_mcp.result import ReasoningEffort, WorkerResult, WorkerStatus
 
 # Heartbeat cadence for the in-flight log line. A module constant would be a
 # global; keep it as a default argument so callers can override in tests.
@@ -81,14 +81,17 @@ def run_delegation(
     config: StrataConfig,
     task: str,
     context: str,
+    model: str | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
     heartbeat_s: float = _DEFAULT_HEARTBEAT_S,
 ) -> WorkerResult:
     """Delegate one task to the Strata worker and return a structured result.
 
-    Guards oversized context before calling Strata, discovers the model, sends
-    one blocking completion with a heartbeat and optional runtime backstop,
-    times the call, and maps the worker's ending to a status. All failures
-    become an error envelope rather than propagating.
+    Guards oversized context before calling Strata, selects the model (the
+    caller's choice, else the first discovered), sends one blocking completion
+    with a heartbeat and optional runtime backstop, times the call, and maps the
+    worker's ending to a status. All failures become an error envelope rather
+    than propagating.
     """
     system_prompt = build_system_prompt()
     user_content = _compose_user_content(task, context)
@@ -100,8 +103,13 @@ def run_delegation(
         return oversized
 
     def _work() -> WorkerResult:
-        model = client.discover_model()
-        completion = client.complete(model, system_prompt, user_content)
+        chosen = model if model else client.discover_models()[0]
+        completion = client.complete(
+            chosen,
+            system_prompt,
+            user_content,
+            reasoning_effort=reasoning_effort.value if reasoning_effort else None,
+        )
         return WorkerResult(
             status=status_from_output(completion.output),
             output=completion.output,

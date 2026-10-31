@@ -48,3 +48,17 @@ def test_status_serialises_to_string_value() -> None:
     result = WorkerResult(status=WorkerStatus.NEEDS_INPUT, output="which file?")
 
     assert result.model_dump()["status"] == "needs_input"
+
+
+def test_reasoning_effort_rejects_invalid_value() -> None:
+    from strata_mcp.result import ReasoningEffort
+
+    with pytest.raises(ValueError):
+        ReasoningEffort("extreme")
+
+
+def test_reasoning_effort_accepts_valid_values() -> None:
+    from strata_mcp.result import ReasoningEffort
+
+    assert ReasoningEffort("none") is ReasoningEffort.NONE
+    assert ReasoningEffort("high") is ReasoningEffort.HIGH

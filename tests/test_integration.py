@@ -58,11 +58,12 @@ def _client(config: StrataConfig) -> StrataClient:
     return StrataClient(config, httpx.Client(timeout=None))
 
 
-def test_model_discovery_returns_a_real_id() -> None:
-    model = _client(_config()).discover_model()
+def test_model_discovery_returns_real_ids() -> None:
+    models = _client(_config()).discover_models()
 
-    assert isinstance(model, str)
-    assert model != ""
+    assert isinstance(models, list)
+    assert models
+    assert all(isinstance(m, str) and m for m in models)
 
 
 def test_delegation_returns_a_valid_envelope() -> None:
@@ -147,3 +148,45 @@ def test_oversized_context_never_contacts_strata() -> None:
     assert result.error is not None
     assert "exceed model context size" in result.error
     assert elapsed < 1.0  # no network round-trip happened
+
+
+def test_list_models_and_explicit_model_delegation() -> None:
+    from strata_mcp.server import delegate_task_impl, list_models_impl
+
+    config = _config()
+    http = httpx.Client(timeout=None)
+    try:
+        models = list_models_impl(config, http)
+    finally:
+        http.close()
+
+    assert models  # at least one model reported
+    assert all(isinstance(m, str) and m for m in models)
+
+    # Delegate with an explicit model id taken from the live list.
+    response = delegate_task_impl(config, task="Reply with: ok", context="", model=models[0])
+
+    assert response.result.status is not WorkerStatus.ERROR
+    assert response.result.output.strip() != ""
+
+
+def test_reasoning_effort_none_reduces_tokens() -> None:
+    from strata_mcp.result import ReasoningEffort
+    from strata_mcp.server import delegate_task_impl
+
+    config = _config()
+    task = "What is 17 + 25? Answer with just the number."
+
+    default = delegate_task_impl(config, task=task, context="")
+    no_think = delegate_task_impl(
+        config, task=task, context="", reasoning_effort=ReasoningEffort.NONE
+    )
+
+    assert default.result.token_usage is not None
+    assert no_think.result.token_usage is not None
+    # Turning thinking off must not produce MORE completion tokens; on this
+    # model it produces dramatically fewer. Assert the deterministic direction.
+    assert (
+        no_think.result.token_usage.completion_tokens
+        <= default.result.token_usage.completion_tokens
+    )

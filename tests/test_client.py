@@ -20,13 +20,20 @@ def _client(handler, api_key: str | None = None) -> StrataClient:
     return StrataClient(config, httpx.Client(transport=transport))
 
 
-def test_discover_model_returns_first_listed_id() -> None:
+def test_discover_models_returns_all_listed_ids() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/models"
         assert request.method == "GET"
         return httpx.Response(200, json={"data": [{"id": "qwen3-flash"}, {"id": "other"}]})
 
-    assert _client(handler).discover_model() == "qwen3-flash"
+    assert _client(handler).discover_models() == ["qwen3-flash", "other"]
+
+
+def test_discover_models_single_model() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "only-one"}]})
+
+    assert _client(handler).discover_models() == ["only-one"]
 
 
 def test_requests_omit_auth_header_without_key() -> None:
@@ -34,7 +41,7 @@ def test_requests_omit_auth_header_without_key() -> None:
         assert "authorization" not in {k.lower() for k in request.headers}
         return httpx.Response(200, json={"data": [{"id": "m"}]})
 
-    _client(handler).discover_model()
+    _client(handler).discover_models()
 
 
 def test_requests_include_bearer_header_with_key() -> None:
@@ -42,7 +49,7 @@ def test_requests_include_bearer_header_with_key() -> None:
         assert request.headers["Authorization"] == "Bearer secret-token"
         return httpx.Response(200, json={"data": [{"id": "m"}]})
 
-    _client(handler, api_key="secret-token").discover_model()
+    _client(handler, api_key="secret-token").discover_models()
 
 
 def test_completion_request_shape() -> None:
@@ -90,12 +97,34 @@ def test_completion_defaults_to_zero_temperature() -> None:
     _client(handler).complete("m", "sys", "q")
 
 
+def test_completion_sends_reasoning_effort_when_set() -> None:
+    import json as json_mod
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json_mod.loads(request.content)
+        assert body["reasoning_effort"] == "none"
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _client(handler).complete("m", "sys", "q", reasoning_effort="none")
+
+
+def test_completion_omits_reasoning_effort_when_unset() -> None:
+    import json as json_mod
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json_mod.loads(request.content)
+        assert "reasoning_effort" not in body
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    _client(handler).complete("m", "sys", "q")
+
+
 def test_discovery_maps_connect_error_to_unreachable() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused")
 
     with pytest.raises(StrataUnreachableError):
-        _client(handler).discover_model()
+        _client(handler).discover_models()
 
 
 def test_discovery_maps_bad_status_to_discovery_error() -> None:
@@ -103,7 +132,7 @@ def test_discovery_maps_bad_status_to_discovery_error() -> None:
         return httpx.Response(500, json={})
 
     with pytest.raises(ModelDiscoveryError):
-        _client(handler).discover_model()
+        _client(handler).discover_models()
 
 
 def test_discovery_rejects_empty_model_list() -> None:
@@ -111,7 +140,7 @@ def test_discovery_rejects_empty_model_list() -> None:
         return httpx.Response(200, json={"data": []})
 
     with pytest.raises(ModelDiscoveryError):
-        _client(handler).discover_model()
+        _client(handler).discover_models()
 
 
 def test_completion_with_usage_is_parsed() -> None:

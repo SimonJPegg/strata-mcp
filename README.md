@@ -58,7 +58,7 @@ The server reads a TOML config file. It is discovered in this order:
    `~/.config`), i.e. `~/.config/strata-mcp/config.toml`.
 
 ```toml
-# strata-mcp.toml
+# ~/.config/strata-mcp/config.toml  (or the path in STRATA_MCP_CONFIG)
 # Strata's OpenAI-compatible base URL (default shown).
 base_url = "http://127.0.0.1:8080/v1"
 
@@ -85,15 +85,36 @@ configure a model name.
 
 ## Run
 
+Once installed (see Install) with a config file at the discovered location, the
+server runs as a plain command that speaks MCP over stdio:
+
 ```bash
-STRATA_MCP_CONFIG=./strata-mcp.toml uv run strata-mcp
+strata-mcp
 ```
 
-The server speaks MCP over stdio.
+For development from a checkout, or to point at a specific config file:
+
+```bash
+STRATA_MCP_CONFIG=./config.toml uv run strata-mcp
+```
 
 ## Wiring an MCP host
 
-Point your MCP host at the server command. A typical stdio server entry:
+Point your MCP host at the server command. With `strata-mcp` installed and a
+config file at the discovered location, the entry is just:
+
+```json
+{
+  "mcpServers": {
+    "strata-mcp": {
+      "command": "strata-mcp"
+    }
+  }
+}
+```
+
+For a development checkout, or to point at a specific config file, use `uv run`
+and set `STRATA_MCP_CONFIG`:
 
 ```json
 {
@@ -102,7 +123,7 @@ Point your MCP host at the server command. A typical stdio server entry:
       "command": "uv",
       "args": ["run", "strata-mcp"],
       "env": {
-        "STRATA_MCP_CONFIG": "/absolute/path/to/strata-mcp.toml"
+        "STRATA_MCP_CONFIG": "/absolute/path/to/config.toml"
       }
     }
   }
@@ -112,12 +133,20 @@ Point your MCP host at the server command. A typical stdio server entry:
 ## The `delegate_task` tool
 
 ```
-delegate_task(task: str, context: str = "") -> DelegateTaskResult
+delegate_task(task: str, context: str = "", model: str | None = None, reasoning_effort: str | None = None) -> DelegateTaskResult
 ```
 
 - `task` — the scoped instruction for the worker.
 - `context` — only the snippets the worker needs. The local context window is
   the scarce resource; send the minimum.
+- `model` — optional. The model id to use (see `list_models`). When omitted,
+  the first model the engine reports is used.
+- `reasoning_effort` — optional, one of `none | low | medium | high`. A unified
+  thinking control: both Strata and Ollama honour `reasoning_effort` on the
+  OpenAI-compatible endpoint, with `none` turning the reasoning phase off
+  (useful for fast, bounded tasks). When omitted, the backend's default applies
+  (thinking on). Best-effort and model-dependent — some models ignore levels or
+  collapse them (e.g. this Qwen treats `low` and `medium` the same).
 
 The response carries:
 
@@ -125,6 +154,28 @@ The response carries:
   `token_usage`, and `error` (set when `status` is `error`).
 - `model_context_size` — the declared window, so the caller can budget the next
   call.
+
+## The `list_models` tool
+
+```
+list_models() -> list[str]
+```
+
+Returns the model identifiers the engine reports from `/v1/models`, so the
+caller can pick one to pass to `delegate_task`. With a single-model backend such
+as Strata this returns one id; with a multi-model backend such as Ollama it
+returns all available ids, and the caller chooses which fits the task.
+
+### A note on `model_context_size`
+
+`model_context_size` is a single value you set in config; it is **not** derived
+per model from the engine. This is deliberate: the OpenAI-compatible
+`/v1/models` endpoint does not reliably expose context length across backends.
+Strata reports it, but Ollama's endpoint does not and may silently truncate to
+an internal default. So the operator declares one advisory window that matches
+how the engine was launched. If you select a model whose real window differs
+from the configured value, the configured value is still what is surfaced and
+used for the oversized-context guard.
 
 ### Result status
 

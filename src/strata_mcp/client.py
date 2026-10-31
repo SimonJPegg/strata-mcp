@@ -46,11 +46,8 @@ class StrataClient:
         self._config = config
         self._client = client
 
-    def discover_model(self) -> str:
-        """Return the loaded model id from GET /v1/models.
-
-        Strata serves one loaded model, so the first listed id is used.
-        """
+    def discover_models(self) -> list[str]:
+        """Return all available model ids from GET /v1/models, in order."""
         try:
             response = self._client.get(
                 f"{self._config.base_url}/models",
@@ -62,11 +59,17 @@ class StrataClient:
         except httpx.HTTPError as exc:
             raise StrataUnreachableError(self._config.base_url) from exc
 
-        return _first_model_id(response)
+        return _all_model_ids(response)
 
-    def complete(self, model: str, system_prompt: str, user_content: str) -> CompletionResult:
+    def complete(
+        self,
+        model: str,
+        system_prompt: str,
+        user_content: str,
+        reasoning_effort: str | None = None,
+    ) -> CompletionResult:
         """Send one blocking chat completion and parse the result."""
-        payload = {
+        payload: dict[str, object] = {
             "model": model,
             # Temperature comes from config (default 0): a worker doing a
             # bounded task should be literal and as reproducible as the engine
@@ -77,6 +80,10 @@ class StrataClient:
                 {"role": "user", "content": user_content},
             ],
         }
+        # Unified thinking control: sent only when the caller set it, so an
+        # unset value leaves the backend's own default in effect.
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         try:
             response = self._client.post(
                 f"{self._config.base_url}/chat/completions",
@@ -92,18 +99,26 @@ class StrataClient:
         return _parse_completion(response)
 
 
-def _first_model_id(response: httpx.Response) -> str:
-    """Extract the first model id from a /v1/models response body."""
+def _all_model_ids(response: httpx.Response) -> list[str]:
+    """Extract all model ids from a /v1/models response body, in order."""
     try:
-        data = response.json()
-        models = data["data"]
-        model_id = models[0]["id"]
-    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        models = response.json()["data"]
+    except (ValueError, KeyError, TypeError) as exc:
         raise ModelDiscoveryError(exc) from exc
 
-    if not isinstance(model_id, str) or not model_id:
+    if not isinstance(models, list) or not models:
         raise ModelDiscoveryError
-    return model_id
+
+    model_ids: list[str] = []
+    for model in models:
+        try:
+            model_id = model["id"]
+        except (KeyError, TypeError) as exc:
+            raise ModelDiscoveryError(exc) from exc
+        if not isinstance(model_id, str) or not model_id:
+            raise ModelDiscoveryError
+        model_ids.append(model_id)
+    return model_ids
 
 
 def _parse_completion(response: httpx.Response) -> CompletionResult:
