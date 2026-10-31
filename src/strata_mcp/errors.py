@@ -81,3 +81,10 @@ class RuntimeBackstopError(StrataClientError):
 
     def __init__(self, max_runtime_s: float) -> None:
         super().__init__(f"delegation exceeded max runtime backstop of {max_runtime_s}s")
+
+
+class PathNotAllowedError(Exception):
+    """Raised when a requested file path resolves outside the allowed dirs."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__(f"path not allowed: {path}")

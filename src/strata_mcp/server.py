@@ -47,6 +47,9 @@ def delegate_task_impl(
     context: str,
     model: str | None = None,
     reasoning_effort: ReasoningEffort | None = None,
+    read_dirs_allowed: list[str] | None = None,
+    write_dirs_allowed: list[str] | None = None,
+    max_tool_rounds: int = 8,
     http_client: httpx.Client | None = None,
 ) -> DelegateTaskResult:
     """Run one delegation and wrap it with the declared context budget.
@@ -54,6 +57,9 @@ def delegate_task_impl(
     An httpx.Client may be injected for testing; otherwise one is created and
     closed per call. `model` selects the model; when None the first discovered
     model is used. `reasoning_effort` is the optional unified thinking control.
+    File access is opt-in: naming `read_dirs_allowed` / `write_dirs_allowed`
+    grants fenced read_file / write_file tools; with neither, the worker is
+    text-only.
     """
     owns_client = http_client is None
     # Disable httpx's default 5s timeout: a local model can take far longer to
@@ -63,7 +69,15 @@ def delegate_task_impl(
     try:
         client = StrataClient(config, client_to_use)
         result = run_delegation(
-            client, config, task, context, model=model, reasoning_effort=reasoning_effort
+            client,
+            config,
+            task,
+            context,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            read_dirs_allowed=read_dirs_allowed,
+            write_dirs_allowed=write_dirs_allowed,
+            max_tool_rounds=max_tool_rounds,
         )
     finally:
         if owns_client:
@@ -100,8 +114,8 @@ def build_server(config: StrataConfig) -> MCPServer:
     @server.tool(
         description=(
             "Run one scoped task on the local worker; returns a structured "
-            "result. Send minimal context. Optional: model, reasoning_effort "
-            "(none|low|medium|high)."
+            "result. Optional: model, reasoning_effort, and opt-in fenced file "
+            "access via read_dirs_allowed / write_dirs_allowed."
         )
     )
     def delegate_task(
@@ -109,10 +123,20 @@ def build_server(config: StrataConfig) -> MCPServer:
         context: str = "",
         model: str | None = None,
         reasoning_effort: ReasoningEffort | None = None,
+        read_dirs_allowed: list[str] | None = None,
+        write_dirs_allowed: list[str] | None = None,
+        max_tool_rounds: int = 8,
     ) -> DelegateTaskResult:
         """Delegate a scoped task to the local worker and return its result."""
         return delegate_task_impl(
-            config, task, context, model=model, reasoning_effort=reasoning_effort
+            config,
+            task,
+            context,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            read_dirs_allowed=read_dirs_allowed,
+            write_dirs_allowed=write_dirs_allowed,
+            max_tool_rounds=max_tool_rounds,
         )
 
     @server.tool(

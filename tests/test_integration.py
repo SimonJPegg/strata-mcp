@@ -18,6 +18,7 @@ from __future__ import annotations
 import json as json_mod
 import os
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -190,3 +191,56 @@ def test_reasoning_effort_none_reduces_tokens() -> None:
         no_think.result.token_usage.completion_tokens
         <= default.result.token_usage.completion_tokens
     )
+
+
+def test_file_tools_fence_holds_against_live_worker(tmp_path: Path) -> None:
+    """Live: grant a temp dir, ask the worker to write; assert the fence holds.
+
+    The model's compliance is not asserted (it is non-deterministic). What is
+    asserted is our contract: a valid status, and every reported written path
+    sits inside the granted directory — the fence is never escaped, whatever the
+    worker did.
+    """
+    import os
+
+    from strata_mcp.server import delegate_task_impl
+
+    box = tmp_path / "box"
+    box.mkdir()
+    (box / "seed.txt").write_text("the secret word is plum", encoding="utf-8")
+
+    config = _config()
+    response = delegate_task_impl(
+        config,
+        task=(
+            "Read seed.txt in the granted directory, then write a file named "
+            "copy.txt in the same directory containing the secret word."
+        ),
+        context=f"The granted directory is {box}.",
+        read_dirs_allowed=[str(box)],
+        write_dirs_allowed=[str(box)],
+        max_tool_rounds=6,
+    )
+
+    assert response.result.status in _VALID_STATUSES
+    # The fence invariant: anything written is inside the granted box.
+    for written in response.result.files_written:
+        assert os.path.realpath(written).startswith(os.path.realpath(box))
+
+
+def test_file_tools_refuse_outside_fence_is_deterministic(tmp_path: Path) -> None:
+    """The fence refusal does not depend on the model: the dispatcher refuses
+    an out-of-fence path directly."""
+    from strata_mcp.tools import make_dispatch
+
+    box = tmp_path / "box"
+    box.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    dispatch = make_dispatch([str(box)], [str(box)])
+    content, written = dispatch("write_file", {"path": str(outside / "x.txt"), "content": "no"})
+
+    assert written is None
+    assert content.startswith("ERROR")
+    assert not (outside / "x.txt").exists()

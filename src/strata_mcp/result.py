@@ -45,6 +45,7 @@ class WorkerResult(BaseModel):
     elapsed_s: float = 0.0
     token_usage: TokenUsage | None = None
     error: str | None = None
+    files_written: list[str] = []
 
     @model_validator(mode="after")
     def _error_requires_message(self) -> WorkerResult:

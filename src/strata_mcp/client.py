@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
+
 import httpx
 from pydantic import BaseModel
 
@@ -25,6 +28,21 @@ class CompletionResult(BaseModel):
 
     output: str
     token_usage: TokenUsage | None = None
+
+
+class ToolLoopResult(BaseModel):
+    """Outcome of a bounded tool-use loop."""
+
+    output: str
+    rounds_used: int
+    hit_round_cap: bool = False
+    written_paths: list[str] = []
+
+
+# A tool dispatcher executes one tool call by name and JSON-decoded args, and
+# returns (content_for_the_model, optional_written_path). Injected by the
+# delegation layer so the client stays free of filesystem knowledge.
+ToolDispatch = Callable[[str, dict], "tuple[str, str | None]"]
 
 
 def _auth_headers(api_key: str | None) -> dict[str, str]:
@@ -97,6 +115,78 @@ class StrataClient:
             raise StrataUnreachableError(self._config.base_url) from exc
 
         return _parse_completion(response)
+
+    def complete_with_tools(
+        self,
+        model: str,
+        system_prompt: str,
+        user_content: str,
+        tools: list[dict],
+        dispatch: ToolDispatch,
+        max_tool_rounds: int,
+        reasoning_effort: str | None = None,
+    ) -> ToolLoopResult:
+        """Run a bounded OpenAI-compatible tool-calling loop and return the result."""
+        messages: list[dict] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        written_paths: list[str] = []
+
+        for round_index in range(max_tool_rounds):
+            payload: dict[str, object] = {
+                "model": model,
+                "temperature": self._config.temperature,
+                "messages": messages,
+                "tools": tools,
+                "tool_choice": "auto",
+            }
+            if reasoning_effort is not None:
+                payload["reasoning_effort"] = reasoning_effort
+
+            try:
+                response = self._client.post(
+                    f"{self._config.base_url}/chat/completions",
+                    headers=_auth_headers(self._config.api_key),
+                    json=payload,
+                )
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise CompletionResponseError(exc) from exc
+            except httpx.HTTPError as exc:
+                raise StrataUnreachableError(self._config.base_url) from exc
+
+            msg = response.json()["choices"][0]["message"]
+            tool_calls = msg.get("tool_calls")
+
+            if not tool_calls:
+                return ToolLoopResult(
+                    output=msg.get("content") or "",
+                    rounds_used=round_index + 1,
+                    hit_round_cap=False,
+                    written_paths=written_paths,
+                )
+
+            messages.append(msg)
+            for tc in tool_calls:
+                name = tc["function"]["name"]
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+                content, written = dispatch(name, args)
+                if written is not None:
+                    written_paths.append(written)
+                messages.append(
+                    {"role": "tool", "tool_call_id": tc["id"], "content": content}
+                )
+
+        return ToolLoopResult(
+            output="",
+            rounds_used=max_tool_rounds,
+            hit_round_cap=True,
+            written_paths=written_paths,
+        )
 
 
 def _all_model_ids(response: httpx.Response) -> list[str]:

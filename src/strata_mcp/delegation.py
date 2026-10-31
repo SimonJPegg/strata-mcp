@@ -19,10 +19,14 @@ from strata_mcp.errors import (
 from strata_mcp.mapping import error_result, status_from_output
 from strata_mcp.prompt import build_system_prompt
 from strata_mcp.result import ReasoningEffort, WorkerResult, WorkerStatus
+from strata_mcp.tools import build_tools, make_dispatch
 
 # Heartbeat cadence for the in-flight log line. A module constant would be a
 # global; keep it as a default argument so callers can override in tests.
 _DEFAULT_HEARTBEAT_S = 30.0
+# Default cap on tool-use rounds. A small bound: enough for a bounded file job,
+# low enough that a confused worker cannot loop indefinitely.
+_DEFAULT_MAX_TOOL_ROUNDS = 8
 # Rough characters-per-token estimate for the oversized-context pre-check. The
 # check is a cheap guard, not an exact tokeniser; Strata enforces the real cap.
 _CHARS_PER_TOKEN = 4
@@ -83,16 +87,20 @@ def run_delegation(
     context: str,
     model: str | None = None,
     reasoning_effort: ReasoningEffort | None = None,
+    read_dirs_allowed: list[str] | None = None,
+    write_dirs_allowed: list[str] | None = None,
+    max_tool_rounds: int = _DEFAULT_MAX_TOOL_ROUNDS,
     heartbeat_s: float = _DEFAULT_HEARTBEAT_S,
 ) -> WorkerResult:
     """Delegate one task to the Strata worker and return a structured result.
 
-    Guards oversized context before calling Strata, selects the model (the
-    caller's choice, else the first discovered), sends one blocking completion
-    with a heartbeat and optional runtime backstop, times the call, and maps the
-    worker's ending to a status. All failures become an error envelope rather
-    than propagating.
+    Guards oversized context, selects the model, and runs the worker. When the
+    caller grants file directories, the worker runs a bounded tool-use loop with
+    fenced read_file/write_file; otherwise it is a single text-only completion.
+    All failures become an error envelope rather than propagating.
     """
+    read_dirs = read_dirs_allowed or []
+    write_dirs = write_dirs_allowed or []
     system_prompt = build_system_prompt()
     user_content = _compose_user_content(task, context)
 
@@ -102,18 +110,40 @@ def run_delegation(
     if oversized is not None:
         return oversized
 
+    tools = build_tools(read_dirs, write_dirs)
+
     def _work() -> WorkerResult:
         chosen = model if model else client.discover_models()[0]
-        completion = client.complete(
+        effort = reasoning_effort.value if reasoning_effort else None
+        if not tools:
+            completion = client.complete(chosen, system_prompt, user_content, effort)
+            return WorkerResult(
+                status=status_from_output(completion.output),
+                output=completion.output,
+                token_usage=completion.token_usage,
+            )
+        loop = client.complete_with_tools(
             chosen,
             system_prompt,
             user_content,
-            reasoning_effort=reasoning_effort.value if reasoning_effort else None,
+            tools,
+            make_dispatch(read_dirs, write_dirs),
+            max_tool_rounds,
+            effort,
         )
+        if loop.hit_round_cap:
+            # The worker ran out of rounds without a final answer. That is a
+            # blocked state, not a transport error: report needs_input so the
+            # caller can give more budget or narrow the task.
+            return WorkerResult(
+                status=WorkerStatus.NEEDS_INPUT,
+                output=f"stopped after {loop.rounds_used} tool rounds without finishing",
+                files_written=loop.written_paths,
+            )
         return WorkerResult(
-            status=status_from_output(completion.output),
-            output=completion.output,
-            token_usage=completion.token_usage,
+            status=status_from_output(loop.output),
+            output=loop.output,
+            files_written=loop.written_paths,
         )
 
     try:
