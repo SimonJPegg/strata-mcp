@@ -1,6 +1,6 @@
 [project]
 name = "strata-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server that delegates scoped tasks to a local Strata-backed worker"
 readme = "README.md"
 authors = [
