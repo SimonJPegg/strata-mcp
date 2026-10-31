@@ -1,0 +1,48 @@
+[project]
+name = "strata-mcp"
+version = "0.1.0"
+description = "MCP server that delegates scoped tasks to a local Strata-backed worker"
+readme = "README.md"
+authors = [
+    { name = "Ciaran Kearney", email = "ciaran@antipathy.org" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+    "mcp>=2.3.0",
+    "pydantic>=2.14.2",
+]
+
+[project.scripts]
+strata-mcp = "strata_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]
+
+[tool.ruff]
+# Target the pinned runtime; keep line length conventional.
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F: pyflakes+pycodestyle, I: import sorting, C90: mccabe complexity (C901),
+# TRY: tryceratops (enforces raise-vanilla-args / TRY003), UP: pyupgrade,
+# B: bugbear, SIM: simplify. Aligns with the project complexity standard.
+select = ["E", "F", "I", "C90", "TRY", "UP", "B", "SIM"]
+
+[tool.ruff.lint.mccabe]
+# C901: flag functions whose cyclomatic complexity exceeds 10.
+max-complexity = 10
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

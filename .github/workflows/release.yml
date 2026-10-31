@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags:
+      # Coarse glob: digits.digits.digits with an optional suffix.
+      # GitHub tag filters are globs, not regex (`*` = any run of chars,
+      # `[0-9]` = one digit), so this only approximates a semver shape.
+      # The "Validate tag is strict semver" step below does the real
+      # enforcement with a full regex.
+      - "[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  # Needed to create a Release and upload assets with the built-in token.
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate tag is strict semver
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # Official SemVer 2.0.0 regex (without a leading "v").
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9][0-9]*|[0-9]*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
+          if [[ ! "$tag" =~ $semver ]]; then
+            echo "Tag '$tag' is not valid semver (expected MAJOR.MINOR.PATCH). Refusing to release." >&2
+            exit 1
+          fi
+          echo "Releasing semver tag: $tag"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: "0.12.1"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Publish GitHub Release with artifacts
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
