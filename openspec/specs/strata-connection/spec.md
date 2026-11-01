@@ -45,6 +45,14 @@ impose a time limit on a delegation.
 - **WHEN** no maximum-runtime backstop is configured
 - **THEN** a delegation is not terminated on elapsed time alone
 
+#### Scenario: A configured backstop bounds a hung request
+
+- **WHEN** a maximum-runtime backstop is configured and a single request to
+  Strata stops making progress
+- **THEN** that request is bounded by the backstop and aborted rather than left
+  running after the caller is returned an `error`, surfaced as a structured
+  error result
+
 #### Scenario: API key sent when configured
 
 - **WHEN** an API key is configured and the server sends a request to Strata
