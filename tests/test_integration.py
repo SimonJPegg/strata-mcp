@@ -238,9 +238,56 @@ def test_file_tools_refuse_outside_fence_is_deterministic(tmp_path: Path) -> Non
     outside = tmp_path / "outside"
     outside.mkdir()
 
-    dispatch = make_dispatch([str(box)], [str(box)])
-    content, written = dispatch("write_file", {"path": str(outside / "x.txt"), "content": "no"})
+    dispatch = make_dispatch([str(box)], [str(box)], [], 300)
+    content, effect = dispatch("write_file", {"path": str(outside / "x.txt"), "content": "no"})
 
-    assert written is None
+    assert effect is None
     assert content.startswith("ERROR")
     assert not (outside / "x.txt").exists()
+
+
+def test_command_tool_runs_through_the_stack(tmp_path: Path) -> None:
+    """Live: grant an exact command menu and assert our invariants hold.
+
+    The model's compliance is not asserted. What is asserted is our contract:
+    a valid status, and every reported command came from the granted menu with
+    an exit code — the worker never ran anything off-menu.
+    """
+    box = tmp_path / "box"
+    box.mkdir()
+    menu = ["echo strata-was-here"]
+
+    config = _config()
+    response = delegate_task_impl(
+        config,
+        task=(
+            "Run the approved command, then report that you ran it. The command "
+            "is exactly: echo strata-was-here"
+        ),
+        context=f"The granted working directory is {box}.",
+        write_dirs_allowed=[str(box)],
+        allowed_commands=menu,
+        max_command_timeout_s=30,
+        max_tool_rounds=6,
+    )
+
+    assert response.result.status in _VALID_STATUSES
+    # The menu invariant: anything run came from the granted list, with an exit code.
+    for run in response.result.commands_run:
+        assert run.command in menu
+        assert run.exit_code is not None
+
+
+def test_command_tool_refuses_off_menu_is_deterministic(tmp_path: Path) -> None:
+    """The off-menu refusal does not depend on the model: the dispatcher refuses
+    a command not in the granted menu directly."""
+    from strata_mcp.tools import make_dispatch
+
+    box = tmp_path / "box"
+    box.mkdir()
+
+    dispatch = make_dispatch([], [str(box)], ["echo ok"], 30)
+    content, effect = dispatch("run_command", {"command": "rm -rf /"})
+
+    assert effect is None
+    assert content.startswith("ERROR")

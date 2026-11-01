@@ -30,6 +30,20 @@ class CompletionResult(BaseModel):
     token_usage: TokenUsage | None = None
 
 
+class CommandRun(BaseModel):
+    """One executed command and its exit code, surfaced to the caller."""
+
+    command: str
+    exit_code: int | None = None
+
+
+class ToolEffect(BaseModel):
+    """Side effect of a tool call: a written path and/or an executed command."""
+
+    written_path: str | None = None
+    command_run: CommandRun | None = None
+
+
 class ToolLoopResult(BaseModel):
     """Outcome of a bounded tool-use loop."""
 
@@ -37,12 +51,13 @@ class ToolLoopResult(BaseModel):
     rounds_used: int
     hit_round_cap: bool = False
     written_paths: list[str] = []
+    commands_run: list[CommandRun] = []
 
 
 # A tool dispatcher executes one tool call by name and JSON-decoded args, and
-# returns (content_for_the_model, optional_written_path). Injected by the
-# delegation layer so the client stays free of filesystem knowledge.
-ToolDispatch = Callable[[str, dict], "tuple[str, str | None]"]
+# returns (content_for_the_model, optional_effect). Injected by the delegation
+# layer so the client stays free of filesystem and subprocess knowledge.
+ToolDispatch = Callable[[str, dict], "tuple[str, ToolEffect | None]"]
 
 
 def _auth_headers(api_key: str | None) -> dict[str, str]:
@@ -132,6 +147,7 @@ class StrataClient:
             {"role": "user", "content": user_content},
         ]
         written_paths: list[str] = []
+        commands_run: list[CommandRun] = []
 
         for round_index in range(max_tool_rounds):
             payload: dict[str, object] = {
@@ -165,6 +181,7 @@ class StrataClient:
                     rounds_used=round_index + 1,
                     hit_round_cap=False,
                     written_paths=written_paths,
+                    commands_run=commands_run,
                 )
 
             messages.append(msg)
@@ -174,9 +191,11 @@ class StrataClient:
                     args = json.loads(tc["function"]["arguments"])
                 except json.JSONDecodeError:
                     args = {}
-                content, written = dispatch(name, args)
-                if written is not None:
-                    written_paths.append(written)
+                content, effect = dispatch(name, args)
+                if effect is not None and effect.written_path is not None:
+                    written_paths.append(effect.written_path)
+                if effect is not None and effect.command_run is not None:
+                    commands_run.append(effect.command_run)
                 messages.append(
                     {"role": "tool", "tool_call_id": tc["id"], "content": content}
                 )
@@ -186,6 +205,7 @@ class StrataClient:
             rounds_used=max_tool_rounds,
             hit_round_cap=True,
             written_paths=written_paths,
+            commands_run=commands_run,
         )
 
 

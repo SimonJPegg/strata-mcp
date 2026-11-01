@@ -6,7 +6,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, model_validator
 
-from strata_mcp.client import TokenUsage
+from strata_mcp.client import CommandRun, TokenUsage
 from strata_mcp.errors import MissingErrorMessageError
 
 
@@ -46,6 +46,7 @@ class WorkerResult(BaseModel):
     token_usage: TokenUsage | None = None
     error: str | None = None
     files_written: list[str] = []
+    commands_run: list[CommandRun] = []
 
     @model_validator(mode="after")
     def _error_requires_message(self) -> WorkerResult:

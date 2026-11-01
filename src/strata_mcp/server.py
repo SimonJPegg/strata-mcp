@@ -50,6 +50,8 @@ def delegate_task_impl(
     read_dirs_allowed: list[str] | None = None,
     write_dirs_allowed: list[str] | None = None,
     max_tool_rounds: int = 8,
+    allowed_commands: list[str] | None = None,
+    max_command_timeout_s: int = 300,
     http_client: httpx.Client | None = None,
 ) -> DelegateTaskResult:
     """Run one delegation and wrap it with the declared context budget.
@@ -58,8 +60,9 @@ def delegate_task_impl(
     closed per call. `model` selects the model; when None the first discovered
     model is used. `reasoning_effort` is the optional unified thinking control.
     File access is opt-in: naming `read_dirs_allowed` / `write_dirs_allowed`
-    grants fenced read_file / write_file tools; with neither, the worker is
-    text-only.
+    grants fenced read_file / write_file tools. `allowed_commands` grants a
+    fenced run_command tool for those exact commands; it needs a write dir for
+    the command cwd. With no grants, the worker is text-only.
     """
     owns_client = http_client is None
     # Disable httpx's default 5s timeout: a local model can take far longer to
@@ -78,6 +81,8 @@ def delegate_task_impl(
             read_dirs_allowed=read_dirs_allowed,
             write_dirs_allowed=write_dirs_allowed,
             max_tool_rounds=max_tool_rounds,
+            allowed_commands=allowed_commands,
+            max_command_timeout_s=max_command_timeout_s,
         )
     finally:
         if owns_client:
@@ -103,19 +108,22 @@ def build_server(config: StrataConfig) -> MCPServer:
     server = MCPServer(
         name="strata-mcp",
         # Loaded into the host's context at connect time, so keep it dense:
-        # routing guidance only, details live in the README.
+        # routing guidance only, details live in the README. Installing the
+        # server is itself the preference signal, so state the bias as default.
         instructions=(
-            "Delegate a bounded, well-specified subtask to a cheap local worker: "
-            "you plan and validate, it does the grunt work. Not for "
-            "judgement-heavy or ambiguous tasks."
+            "Delegate by default: the local worker does bounded, checkable "
+            "work; you plan, spec, validate. Do it yourself only when the "
+            "model would struggle — judgement, long reasoning, uncheckable, "
+            "or spec as costly as the work. Not because it is faster. Opt-in: "
+            "fenced files, command menu."
         ),
     )
 
     @server.tool(
         description=(
             "Run one scoped task on the local worker; returns a structured "
-            "result. Optional: model, reasoning_effort, and opt-in fenced file "
-            "access via read_dirs_allowed / write_dirs_allowed."
+            "result. Opt-in: model, reasoning_effort, fenced files "
+            "(read/write_dirs_allowed), exact commands (allowed_commands)."
         )
     )
     def delegate_task(
@@ -126,6 +134,8 @@ def build_server(config: StrataConfig) -> MCPServer:
         read_dirs_allowed: list[str] | None = None,
         write_dirs_allowed: list[str] | None = None,
         max_tool_rounds: int = 8,
+        allowed_commands: list[str] | None = None,
+        max_command_timeout_s: int = 300,
     ) -> DelegateTaskResult:
         """Delegate a scoped task to the local worker and return its result."""
         return delegate_task_impl(
@@ -137,6 +147,8 @@ def build_server(config: StrataConfig) -> MCPServer:
             read_dirs_allowed=read_dirs_allowed,
             write_dirs_allowed=write_dirs_allowed,
             max_tool_rounds=max_tool_rounds,
+            allowed_commands=allowed_commands,
+            max_command_timeout_s=max_command_timeout_s,
         )
 
     @server.tool(

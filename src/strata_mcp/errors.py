@@ -88,3 +88,10 @@ class PathNotAllowedError(Exception):
 
     def __init__(self, path: str) -> None:
         super().__init__(f"path not allowed: {path}")
+
+
+class CommandsNeedWriteDirError(ValueError):
+    """Raised when allowed_commands is set but no write dir gives commands a cwd."""
+
+    def __init__(self) -> None:
+        super().__init__("allowed_commands requires a non-empty write_dirs_allowed")

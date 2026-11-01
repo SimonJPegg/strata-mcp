@@ -12,6 +12,7 @@ from loguru import logger
 from strata_mcp.client import StrataClient
 from strata_mcp.config import StrataConfig
 from strata_mcp.errors import (
+    CommandsNeedWriteDirError,
     OversizedContextError,
     RuntimeBackstopError,
     StrataClientError,
@@ -27,6 +28,9 @@ _DEFAULT_HEARTBEAT_S = 30.0
 # Default cap on tool-use rounds. A small bound: enough for a bounded file job,
 # low enough that a confused worker cannot loop indefinitely.
 _DEFAULT_MAX_TOOL_ROUNDS = 8
+# Default per-command timeout ceiling in seconds. The worker may request less;
+# anything more is clamped to this. Bounds a hung command, not the delegation.
+_DEFAULT_MAX_COMMAND_TIMEOUT_S = 300
 # Rough characters-per-token estimate for the oversized-context pre-check. The
 # check is a cheap guard, not an exact tokeniser; Strata enforces the real cap.
 _CHARS_PER_TOKEN = 4
@@ -90,27 +94,45 @@ def run_delegation(
     read_dirs_allowed: list[str] | None = None,
     write_dirs_allowed: list[str] | None = None,
     max_tool_rounds: int = _DEFAULT_MAX_TOOL_ROUNDS,
+    allowed_commands: list[str] | None = None,
+    max_command_timeout_s: int = _DEFAULT_MAX_COMMAND_TIMEOUT_S,
     heartbeat_s: float = _DEFAULT_HEARTBEAT_S,
 ) -> WorkerResult:
     """Delegate one task to the Strata worker and return a structured result.
 
     Guards oversized context, selects the model, and runs the worker. When the
-    caller grants file directories, the worker runs a bounded tool-use loop with
-    fenced read_file/write_file; otherwise it is a single text-only completion.
-    All failures become an error envelope rather than propagating.
+    caller grants file directories or a command menu, the worker runs a bounded
+    tool-use loop with fenced read_file/write_file/run_command; otherwise it is a
+    single text-only completion. All failures become an error envelope rather
+    than propagating.
     """
     read_dirs = read_dirs_allowed or []
     write_dirs = write_dirs_allowed or []
-    system_prompt = build_system_prompt()
+    commands = allowed_commands or []
+    system_prompt = build_system_prompt(
+        has_read=bool(read_dirs),
+        has_write=bool(write_dirs),
+        has_commands=bool(commands),
+    )
     user_content = _compose_user_content(task, context)
 
     start = time.monotonic()
+
+    if commands and not write_dirs:
+        # Commands always run inside a fenced working directory, so a command
+        # menu with no write dir has nowhere safe to run; refuse up front.
+        exc = CommandsNeedWriteDirError()
+        return WorkerResult(
+            status=WorkerStatus.ERROR,
+            elapsed_s=time.monotonic() - start,
+            error=str(exc),
+        )
 
     oversized = _oversized_result(system_prompt, user_content, config, start)
     if oversized is not None:
         return oversized
 
-    tools = build_tools(read_dirs, write_dirs)
+    tools = build_tools(read_dirs, write_dirs, commands)
 
     def _work() -> WorkerResult:
         chosen = model if model else client.discover_models()[0]
@@ -127,7 +149,7 @@ def run_delegation(
             system_prompt,
             user_content,
             tools,
-            make_dispatch(read_dirs, write_dirs),
+            make_dispatch(read_dirs, write_dirs, commands, max_command_timeout_s),
             max_tool_rounds,
             effort,
         )
@@ -139,11 +161,13 @@ def run_delegation(
                 status=WorkerStatus.NEEDS_INPUT,
                 output=f"stopped after {loop.rounds_used} tool rounds without finishing",
                 files_written=loop.written_paths,
+                commands_run=loop.commands_run,
             )
         return WorkerResult(
             status=status_from_output(loop.output),
             output=loop.output,
             files_written=loop.written_paths,
+            commands_run=loop.commands_run,
         )
 
     try:

@@ -6,7 +6,7 @@ import json
 
 import httpx
 
-from strata_mcp.client import StrataClient
+from strata_mcp.client import StrataClient, ToolEffect
 from strata_mcp.config import StrataConfig
 
 
@@ -54,7 +54,7 @@ def test_loop_executes_tools_then_completes() -> None:
 
     dispatched: list[tuple[str, dict]] = []
 
-    def dispatch(name: str, args: dict) -> tuple[str, str | None]:
+    def dispatch(name: str, args: dict) -> tuple[str, ToolEffect | None]:
         dispatched.append((name, args))
         return ("file contents here", None)
 
@@ -81,8 +81,8 @@ def test_loop_tracks_written_paths() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return next(responses)
 
-    def dispatch(name: str, args: dict) -> tuple[str, str | None]:
-        return ("ok", "/box/out.txt")
+    def dispatch(name: str, args: dict) -> tuple[str, ToolEffect | None]:
+        return ("ok", ToolEffect(written_path="/box/out.txt"))
 
     result = _client(handler).complete_with_tools(
         "m", "sys", "write out.txt", _TOOLS, dispatch, max_tool_rounds=5

@@ -116,3 +116,94 @@ def test_round_cap_returns_needs_input() -> None:
     )
 
     assert result.status is WorkerStatus.NEEDS_INPUT
+
+
+def test_allowed_commands_without_write_dir_is_rejected() -> None:
+    # A command menu with no write dir has no fenced cwd: refuse up front.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _models()
+
+    result = run_delegation(
+        _client(handler),
+        StrataConfig(model_context_size=65536),
+        "run tests",
+        "",
+        allowed_commands=["echo hi"],
+    )
+
+    assert result.status is WorkerStatus.ERROR
+    assert "write_dirs_allowed" in (result.error or "")
+
+
+def test_granted_command_runs_through_loop_and_reports_commands_run(tmp_path: Path) -> None:
+    box = str(tmp_path)
+    seen: dict = {}
+    responses = iter(
+        [
+            _models(),
+            httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "tool_calls": [_tool_call("run_command", {"command": "echo hi"})]
+                            }
+                        }
+                    ]
+                },
+            ),
+            httpx.Response(
+                200, json={"choices": [{"message": {"content": f"ran it\n{MARKER_COMPLETED}"}}]}
+            ),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/chat/completions":
+            seen.setdefault("bodies", []).append(json.loads(request.content))
+        return next(responses)
+
+    result = run_delegation(
+        _client(handler),
+        StrataConfig(model_context_size=65536),
+        "run echo",
+        "",
+        write_dirs_allowed=[box],
+        allowed_commands=["echo hi"],
+    )
+
+    assert result.status is WorkerStatus.OK
+    # The command tool was offered.
+    tool_names = {
+        t["function"]["name"] for t in seen["bodies"][0]["tools"]
+    }
+    assert "run_command" in tool_names
+    # The executed command is reported with its exit code.
+    assert len(result.commands_run) == 1
+    assert result.commands_run[0].command == "echo hi"
+    assert result.commands_run[0].exit_code == 0
+
+
+def test_no_commands_means_no_command_tool(tmp_path: Path) -> None:
+    box = str(tmp_path)
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return _models()
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": f"t\n{MARKER_COMPLETED}"}}]}
+        )
+
+    run_delegation(
+        _client(handler),
+        StrataConfig(model_context_size=65536),
+        "t",
+        "",
+        write_dirs_allowed=[box],
+    )
+
+    tool_names = {t["function"]["name"] for t in seen["body"]["tools"]}
+    assert "run_command" not in tool_names

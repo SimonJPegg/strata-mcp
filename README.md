@@ -199,7 +199,8 @@ for the oversized-context guard.
 The worker runs under a system prompt with three jobs:
 
 1. **Frame** — a focused worker doing one scoped task.
-2. **Bound** — no filesystem, no shell, no tools. Text only, no scope creep.
+2. **Bound** — one scoped task, no scope creep. Text only until you grant it
+   file or command access per call.
 3. **Escape** — ambiguous, blocked, or impossible, it stops and self-reports
    instead of grinding on.
 
@@ -257,6 +258,48 @@ Read this part carefully, because it is where the blast radius lives:
 - You still validate. The worker having hands does not make it trustworthy. It
   writes into the box you drew, you check `files_written` and the files
   themselves, and you decide what to keep.
+
+## Command tools
+
+You can also let the worker run commands. Not a shell — a menu. You pre-approve
+the exact commands, the worker picks from them:
+
+```
+delegate_task(
+  task, context,
+  write_dirs_allowed=["/repo/scratch"],
+  allowed_commands=["pytest -q", "ruff check ."],
+  max_command_timeout_s=300,
+)
+```
+
+- `allowed_commands` — the exact command strings the worker may run. Grant a
+  non-empty list and the worker gets a `run_command` tool. Omit it and there is
+  no command tool.
+- `max_command_timeout_s` — the ceiling on a single command. The worker may ask
+  for less per call. It cannot ask for more. A command that overruns is killed.
+- `allowed_commands` needs a non-empty `write_dirs_allowed`. Commands run inside
+  a granted write dir, so without one there is nowhere fenced to run.
+
+The result gains `commands_run`, each command that actually ran with its exit
+code, so you can see what happened without taking the worker's word for it.
+
+This is the tightest fence in the project, and it has to be, because a command
+is the widest blast radius:
+
+- The worker runs a command only by matching an entry **exactly**. It cannot add
+  an argument, cannot chain, cannot invent one. You wrote the whole command line.
+  The worker only chooses which to run.
+- There is no shell. The command is split to an argument list and run directly,
+  so `;`, `|`, `>`, globs, and `&&` are not interpreted. An entry like
+  `echo a; echo b` prints that literal string. It does not run two commands.
+- Commands run in a granted write dir with a scrubbed environment, so the worker
+  cannot read ambient secrets out of your shell or hijack a command through an
+  environment variable.
+- The fence governs **which** command and **where**, not what the command does.
+  Approve `rm -rf .` and it will delete the contents of the write dir you gave
+  it. The safety is that you write the command, not the worker. Approve only
+  commands you would run yourself.
 
 ## Development
 

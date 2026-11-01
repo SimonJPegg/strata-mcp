@@ -1,12 +1,12 @@
 [project]
 name = "strata-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server that delegates scoped tasks to a local Strata-backed worker"
 readme = "README.md"
 authors = [
     { name = "Ciaran Kearney", email = "ciaran@antipathy.org" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "httpx>=0.28.1",
     "loguru>=0.7.3",
@@ -29,7 +29,7 @@ dev = [
 
 [tool.ruff]
 # Target the pinned runtime; keep line length conventional.
-target-version = "py312"
+target-version = "py314"
 line-length = 100
 src = ["src", "tests"]
 

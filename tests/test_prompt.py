@@ -18,12 +18,30 @@ def test_prompt_frames_the_worker() -> None:
     assert "one" in prompt and "task" in prompt
 
 
-def test_prompt_bounds_the_worker_to_no_tools() -> None:
+def test_prompt_bounds_the_worker_to_no_tools_by_default() -> None:
     prompt = build_system_prompt().lower()
 
-    assert "no access to the filesystem" in prompt
-    assert "no shell" in prompt
+    assert "no filesystem, shell, or tools" in prompt
     assert "text only" in prompt
+
+
+def test_prompt_names_granted_tools_instead_of_denying_them() -> None:
+    # The prompt must not claim 'no tools' when the caller granted some.
+    prompt = build_system_prompt(has_read=True, has_write=True, has_commands=True)
+
+    assert "read_file" in prompt
+    assert "write_file" in prompt
+    assert "run_command" in prompt
+    assert "fenced" in prompt
+    assert "text only" not in prompt.lower()
+
+
+def test_prompt_lists_only_granted_tools() -> None:
+    prompt = build_system_prompt(has_write=True)
+
+    assert "write_file" in prompt
+    assert "read_file" not in prompt
+    assert "run_command" not in prompt
 
 
 def test_prompt_gives_an_escape_hatch() -> None:

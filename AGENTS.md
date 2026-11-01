@@ -9,7 +9,7 @@ how to install it, configure it, and the `delegate_task` tool contract, read
 - Use `uv` for everything; do not invoke `pip` or manage a venv by hand.
   - `uv sync` — install dependencies
   - `uv run <cmd>` — run inside the project environment
-- Python 3.12. `uv.lock` is committed; keep it in sync (`uv sync --frozen` must pass).
+- Python 3.14. `uv.lock` is committed; keep it in sync (`uv sync --frozen` must pass).
 
 ## Before you consider a change done
 
@@ -46,8 +46,10 @@ Both must pass. Fix what you touched; do not disable rules to go green.
 These encode decisions in `openspec/specs/`; changing them is a spec change, not
 a tweak:
 
-- The worker is **text-only**: no filesystem, no shell, no tools. (Tool access
-  is a planned future stage, not this one.)
+- The worker is **text-only by default**. File and command tools are opt-in per
+  call: the caller grants directories (`read_dirs_allowed` / `write_dirs_allowed`)
+  or an exact command menu (`allowed_commands`), and the server fences every one.
+  No grant means no tool.
 - Failures return as a `WorkerResult` with `status = error` — they are **never**
   raised to the caller.
 - There is **no hard wall-clock timeout**. The optional `max_runtime_s` backstop
