@@ -48,7 +48,12 @@ def _resolve_cwd(cwd: str | None, write_dirs_allowed: list[str]) -> Path:
 
 def _execute(command: str, workdir: Path, timeout_s: int) -> CommandOutcome:
     """Run argv with shell=False, turning timeout and OSError into refusals, not raises."""
-    argv = shlex.split(command)
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        # An unbalanced quote or trailing backslash in the approved string is a
+        # refusal, not a crash: failures are data in this runner.
+        return _refusal(command, f"could not parse command: {exc}")
     try:
         completed = subprocess.run(
             argv,

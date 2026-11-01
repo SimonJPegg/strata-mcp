@@ -137,3 +137,20 @@ def test_missing_executable_is_a_refusal_not_a_raise(tmp_path):
     )
     assert outcome.ok is False
     assert "execution failed" in (outcome.error or "")
+
+
+def test_unparseable_command_is_a_refusal_not_a_raise(tmp_path):
+    # An unbalanced quote makes shlex.split raise ValueError; it must map to a
+    # refusal (failures are data in this runner), not crash the delegation.
+    bad = 'echo "unterminated'
+    outcome = run_command_op(
+        command=bad,
+        requested_timeout_s=10,
+        allowed_commands=[bad],  # it is on the menu; parsing is what fails
+        write_dirs_allowed=[str(tmp_path)],
+        max_timeout_s=30,
+        cwd=str(tmp_path),
+    )
+    assert outcome.ok is False
+    assert outcome.exit_code is None
+    assert "could not parse command" in (outcome.error or "")

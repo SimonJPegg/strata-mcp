@@ -168,3 +168,49 @@ def test_reasoning_effort_absent_when_omitted() -> None:
     )
 
     assert seen["effort"] == "<absent>"
+
+
+def test_constructed_client_timeout_derives_from_backstop(monkeypatch) -> None:
+    # When no client is injected, the server builds one whose timeout is the
+    # configured max_runtime_s so a hung request is bounded (finding 2).
+    import strata_mcp.server as server_mod
+
+    captured: dict[str, object] = {}
+    real_client = httpx.Client
+
+    def spy(*args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout", "<unset>")
+        return real_client(*args, transport=httpx.MockTransport(_handler), **{
+            k: v for k, v in kwargs.items() if k != "transport"
+        })
+
+    monkeypatch.setattr(server_mod.httpx, "Client", spy)
+
+    delegate_task_impl(
+        StrataConfig(model_context_size=4096, max_runtime_s=30.0),
+        task="t",
+        context="",
+    )
+
+    assert captured["timeout"] == 30.0
+
+
+def test_constructed_client_has_no_timeout_without_backstop(monkeypatch) -> None:
+    # No backstop configured => no request timeout, preserving the
+    # "slow-but-working call must not be killed" guarantee.
+    import strata_mcp.server as server_mod
+
+    captured: dict[str, object] = {}
+    real_client = httpx.Client
+
+    def spy(*args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout", "<unset>")
+        return real_client(*args, transport=httpx.MockTransport(_handler), **{
+            k: v for k, v in kwargs.items() if k != "transport"
+        })
+
+    monkeypatch.setattr(server_mod.httpx, "Client", spy)
+
+    delegate_task_impl(StrataConfig(model_context_size=4096), task="t", context="")
+
+    assert captured["timeout"] is None

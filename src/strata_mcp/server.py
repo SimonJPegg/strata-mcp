@@ -65,10 +65,12 @@ def delegate_task_impl(
     the command cwd. With no grants, the worker is text-only.
     """
     owns_client = http_client is None
-    # Disable httpx's default 5s timeout: a local model can take far longer to
-    # generate, and killing a slow-but-working call is exactly what the design
-    # forbids. The only time bound is the optional max_runtime_s backstop.
-    client_to_use = http_client or httpx.Client(timeout=None)
+    # Bound a single hung request to the runtime backstop so an overrunning
+    # request actually aborts instead of running on after the caller is told
+    # error. When no backstop is configured, there is no request timeout: a
+    # slow-but-working local generation must not be killed. The thread backstop
+    # still bounds the whole delegation across multiple tool-loop requests.
+    client_to_use = http_client or httpx.Client(timeout=config.max_runtime_s)
     try:
         client = StrataClient(config, client_to_use)
         result = run_delegation(
@@ -95,7 +97,8 @@ def list_models_impl(
 ) -> list[str]:
     """Return the available model ids from the inference engine."""
     owns_client = http_client is None
-    client_to_use = http_client or httpx.Client(timeout=None)
+    # Same backstop-derived timeout as delegation; None stays unbounded.
+    client_to_use = http_client or httpx.Client(timeout=config.max_runtime_s)
     try:
         return StrataClient(config, client_to_use).discover_models()
     finally:

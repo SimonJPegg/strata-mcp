@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from strata_mcp.client import StrataClient, ToolEffect
 from strata_mcp.config import StrataConfig
+from strata_mcp.errors import CompletionResponseError
 
 
 def _client(handler) -> StrataClient:
@@ -139,3 +141,46 @@ def test_loop_handles_malformed_tool_arguments() -> None:
 
     assert result.output == "recovered"
     assert received == [{}]
+
+
+def test_loop_malformed_envelope_maps_to_response_error() -> None:
+    # The engine returns a body with no 'choices': must become a typed
+    # CompletionResponseError, not an unhandled KeyError escaping the loop.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"unexpected": "shape"})
+
+    def dispatch(name: str, args: dict) -> tuple[str, ToolEffect | None]:
+        return ("ok", None)
+
+    with pytest.raises(CompletionResponseError):
+        _client(handler).complete_with_tools(
+            "m", "sys", "q", _TOOLS, dispatch, max_tool_rounds=5
+        )
+
+
+def test_loop_skips_malformed_tool_call_entry() -> None:
+    # A tool_calls list whose entry is missing 'function' must not crash the
+    # loop; the bad entry is skipped and the run still completes.
+    bad_entry = {"id": "c1", "type": "function"}  # no 'function' key
+    responses = iter(
+        [
+            httpx.Response(200, json={"choices": [{"message": {"tool_calls": [bad_entry]}}]}),
+            _final("recovered after skipping bad call"),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(responses)
+
+    dispatched: list[str] = []
+
+    def dispatch(name: str, args: dict) -> tuple[str, ToolEffect | None]:
+        dispatched.append(name)
+        return ("ok", None)
+
+    result = _client(handler).complete_with_tools(
+        "m", "sys", "q", _TOOLS, dispatch, max_tool_rounds=5
+    )
+
+    assert result.output == "recovered after skipping bad call"
+    assert dispatched == []  # the malformed call was skipped, never dispatched

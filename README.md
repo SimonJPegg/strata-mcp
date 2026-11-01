@@ -6,7 +6,8 @@ result.
 Intended to be run from within Kiro/ClaudeCode/OpenCode/Whatever. Plan and chat with
 the expensive LLM, pass the grunt work to the free (*cough* electric *cough*) one.
 
-Your local model is slower, but that's the price you pay.
+Your local model is slower, but that's the price you pay.  Tested on Kiro, it works,
+but, it doesn't show status updates, so it's impossible to tell a long task from a stuck one.
 
 The worker is text-only by default. Grant it directories per call and it can
 read and write files inside them, fenced (see File tools). It never runs
@@ -157,6 +158,12 @@ delegate_task(task: str, context: str = "", model: str | None = None, reasoning_
   reasoning phase off for fast bounded tasks. Omitted, the backend default
   applies (thinking on). It is best-effort and depends on the model. Some ignore
   the levels, and this Qwen treats `low` and `medium` the same.
+
+  > Note: best-effort does not mean safe to send blind. A model with no thinking
+  > phase can reject any `reasoning_effort` outright. Ollama's `Qwen3-Coder`
+  > answers a plain call fine but 400s on `reasoning_effort`, and that comes back
+  > as a `status: error` result, not a silent fallback. Send it only to a model
+  > you know thinks, or leave it off.
 
 The response carries:
 

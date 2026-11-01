@@ -172,7 +172,10 @@ class StrataClient:
             except httpx.HTTPError as exc:
                 raise StrataUnreachableError(self._config.base_url) from exc
 
-            msg = response.json()["choices"][0]["message"]
+            try:
+                msg = response.json()["choices"][0]["message"]
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise CompletionResponseError(exc) from exc
             tool_calls = msg.get("tool_calls")
 
             if not tool_calls:
@@ -186,19 +189,9 @@ class StrataClient:
 
             messages.append(msg)
             for tc in tool_calls:
-                name = tc["function"]["name"]
-                try:
-                    args = json.loads(tc["function"]["arguments"])
-                except json.JSONDecodeError:
-                    args = {}
-                content, effect = dispatch(name, args)
-                if effect is not None and effect.written_path is not None:
-                    written_paths.append(effect.written_path)
-                if effect is not None and effect.command_run is not None:
-                    commands_run.append(effect.command_run)
-                messages.append(
-                    {"role": "tool", "tool_call_id": tc["id"], "content": content}
-                )
+                tool_msg = _handle_tool_call(tc, dispatch, written_paths, commands_run)
+                if tool_msg is not None:
+                    messages.append(tool_msg)
 
         return ToolLoopResult(
             output="",
@@ -207,6 +200,35 @@ class StrataClient:
             written_paths=written_paths,
             commands_run=commands_run,
         )
+
+
+def _handle_tool_call(
+    tc: dict,
+    dispatch: ToolDispatch,
+    written_paths: list[str],
+    commands_run: list[CommandRun],
+) -> dict | None:
+    """Run one tool call and return its tool message, or None if malformed.
+
+    A malformed call (missing id/function) is skipped, not raised: a failure is
+    data in this loop. Side effects are appended to the running lists.
+    """
+    try:
+        call_id = tc["id"]
+        name = tc["function"]["name"]
+        raw_args = tc["function"]["arguments"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    try:
+        args = json.loads(raw_args)
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+    content, effect = dispatch(name, args)
+    if effect is not None and effect.written_path is not None:
+        written_paths.append(effect.written_path)
+    if effect is not None and effect.command_run is not None:
+        commands_run.append(effect.command_run)
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
 
 
 def _all_model_ids(response: httpx.Response) -> list[str]:
