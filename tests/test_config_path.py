@@ -32,7 +32,9 @@ def test_xdg_fallback_when_env_unset(clean_env: None, monkeypatch: pytest.Monkey
 
 
 def test_home_config_default(clean_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/home/tester")))
+    # A lambda cannot annotate its cls parameter, so pyrefly sees implicit Any
+    # here; the classmethod wrapper is what makes Path.home() bind correctly.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: Path("/home/tester")))  # pyrefly: ignore[implicit-any-lambda]
 
     assert _resolve_config_path() == Path("/home/tester/.config/strata-mcp/config.toml")
 

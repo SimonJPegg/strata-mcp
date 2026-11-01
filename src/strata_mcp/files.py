@@ -38,11 +38,20 @@ def read_file_op(path: str, read_dirs_allowed: list[str]) -> ToolOutcome:
         resolved = resolve_within(path, read_dirs_allowed)
     except PathNotAllowedError as exc:
         return ToolOutcome(ok=False, error=str(exc))
+    return _read_outcome(resolved)
+
+
+def _read_outcome(resolved: Path) -> ToolOutcome:
+    """Read one already-fenced file, turning every read failure into a failed outcome.
+
+    UnicodeDecodeError is named with OSError on purpose: it subclasses ValueError,
+    so undecodable bytes would otherwise raise out of the tool loop and abort the
+    delegation. A binary file is data the worker should be told about, not a crash.
+    """
     try:
-        text = resolved.read_text(encoding="utf-8")
-    except OSError as exc:
+        return ToolOutcome(ok=True, content=resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
         return ToolOutcome(ok=False, error=str(exc))
-    return ToolOutcome(ok=True, content=text)
 
 
 def write_file_op(path: str, content: str, write_dirs_allowed: list[str]) -> ToolOutcome:
@@ -51,6 +60,11 @@ def write_file_op(path: str, content: str, write_dirs_allowed: list[str]) -> Too
         resolved = resolve_within(path, write_dirs_allowed)
     except PathNotAllowedError as exc:
         return ToolOutcome(ok=False, error=str(exc))
+    return _write_outcome(resolved, content)
+
+
+def _write_outcome(resolved: Path, content: str) -> ToolOutcome:
+    """Write one already-fenced file, reporting the real path it wrote."""
     try:
         # The parent is created inside the fence: resolved is already proven to
         # sit within an allowed dir, so its parent does too.

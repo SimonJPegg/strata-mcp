@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
 
-from strata_mcp.client import StrataClient
+from strata_mcp.client import StrataClient, WireObject
 from strata_mcp.config import StrataConfig
 from strata_mcp.delegation import run_delegation
 from strata_mcp.mapping import MARKER_COMPLETED
 from strata_mcp.result import WorkerStatus
 
 
-def _client(handler) -> StrataClient:
+def _client(handler: Callable[[httpx.Request], httpx.Response]) -> StrataClient:
     return StrataClient(
         StrataConfig(model_context_size=65536), httpx.Client(transport=httpx.MockTransport(handler))
     )
@@ -24,7 +25,7 @@ def _models() -> httpx.Response:
     return httpx.Response(200, json={"data": [{"id": "m"}]})
 
 
-def _tool_call(name: str, args: dict) -> dict:
+def _tool_call(name: str, args: WireObject) -> WireObject:
     return {
         "id": "c1",
         "type": "function",
@@ -34,7 +35,7 @@ def _tool_call(name: str, args: dict) -> dict:
 
 def test_no_allowlists_uses_text_only_path(tmp_path: Path) -> None:
     # With no dirs granted, the request must carry NO tools.
-    seen: dict = {}
+    seen: WireObject = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
@@ -137,7 +138,7 @@ def test_allowed_commands_without_write_dir_is_rejected() -> None:
 
 def test_granted_command_runs_through_loop_and_reports_commands_run(tmp_path: Path) -> None:
     box = str(tmp_path)
-    seen: dict = {}
+    seen: WireObject = {}
     responses = iter(
         [
             _models(),
@@ -175,9 +176,7 @@ def test_granted_command_runs_through_loop_and_reports_commands_run(tmp_path: Pa
 
     assert result.status is WorkerStatus.OK
     # The command tool was offered.
-    tool_names = {
-        t["function"]["name"] for t in seen["bodies"][0]["tools"]
-    }
+    tool_names = {t["function"]["name"] for t in seen["bodies"][0]["tools"]}
     assert "run_command" in tool_names
     # The executed command is reported with its exit code.
     assert len(result.commands_run) == 1
@@ -187,7 +186,7 @@ def test_granted_command_runs_through_loop_and_reports_commands_run(tmp_path: Pa
 
 def test_no_commands_means_no_command_tool(tmp_path: Path) -> None:
     box = str(tmp_path)
-    seen: dict = {}
+    seen: WireObject = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":

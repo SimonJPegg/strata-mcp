@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
-import httpx
+import asyncio
+import json as json_mod
+from typing import Any
 
+import httpx
+import pytest
+
+import strata_mcp.server as server_mod
 from strata_mcp.config import StrataConfig
 from strata_mcp.mapping import MARKER_COMPLETED
-from strata_mcp.result import WorkerStatus
+from strata_mcp.result import ReasoningEffort, WorkerStatus
 from strata_mcp.server import build_server, delegate_task_impl, list_models_impl
 
 
@@ -30,8 +36,6 @@ def test_tool_surfaces_declared_context_size() -> None:
 
 
 def test_build_server_registers_delegate_task() -> None:
-    import asyncio
-
     config = StrataConfig(model_context_size=4096)
 
     server = build_server(config)
@@ -41,8 +45,6 @@ def test_build_server_registers_delegate_task() -> None:
 
 
 def test_build_server_registers_list_models() -> None:
-    import asyncio
-
     server = build_server(StrataConfig(model_context_size=4096))
 
     tools = asyncio.run(server.list_tools())
@@ -61,8 +63,6 @@ def test_server_exposes_concise_instructions() -> None:
 
 
 def test_tool_descriptions_are_dense() -> None:
-    import asyncio
-
     server = build_server(StrataConfig(model_context_size=4096))
     tools = {t.name: t for t in asyncio.run(server.list_tools())}
 
@@ -81,8 +81,6 @@ def test_list_models_impl_returns_ids() -> None:
 
 
 def test_chosen_model_is_used() -> None:
-    import json as json_mod
-
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -95,16 +93,17 @@ def test_chosen_model_is_used() -> None:
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler))
     delegate_task_impl(
-        StrataConfig(model_context_size=4096), task="t", context="",
-        model="second", http_client=http_client,
+        StrataConfig(model_context_size=4096),
+        task="t",
+        context="",
+        model="second",
+        http_client=http_client,
     )
 
     assert seen["model"] == "second"
 
 
 def test_omitted_model_defaults_to_first() -> None:
-    import json as json_mod
-
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -124,9 +123,6 @@ def test_omitted_model_defaults_to_first() -> None:
 
 
 def test_reasoning_effort_reaches_request_when_set() -> None:
-    import json as json_mod
-
-    from strata_mcp.result import ReasoningEffort
 
     seen: dict[str, object] = {}
 
@@ -141,16 +137,17 @@ def test_reasoning_effort_reaches_request_when_set() -> None:
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler))
     delegate_task_impl(
-        StrataConfig(model_context_size=4096), task="t", context="",
-        reasoning_effort=ReasoningEffort.NONE, http_client=http_client,
+        StrataConfig(model_context_size=4096),
+        task="t",
+        context="",
+        reasoning_effort=ReasoningEffort.NONE,
+        http_client=http_client,
     )
 
     assert seen["effort"] == "none"
 
 
 def test_reasoning_effort_absent_when_omitted() -> None:
-    import json as json_mod
-
     seen: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -170,19 +167,24 @@ def test_reasoning_effort_absent_when_omitted() -> None:
     assert seen["effort"] == "<absent>"
 
 
-def test_constructed_client_timeout_derives_from_backstop(monkeypatch) -> None:
+def test_constructed_client_timeout_derives_from_backstop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # When no client is injected, the server builds one whose timeout is the
     # configured max_runtime_s so a hung request is bounded (finding 2).
-    import strata_mcp.server as server_mod
 
     captured: dict[str, object] = {}
     real_client = httpx.Client
 
-    def spy(*args, **kwargs):
+    # Spying on httpx.Client calls: the kwargs carry the timeout under test,
+    # and Any is the honest type for a passthrough monkeypatch.
+    def spy(*args: Any, **kwargs: Any) -> httpx.Client:
         captured["timeout"] = kwargs.get("timeout", "<unset>")
-        return real_client(*args, transport=httpx.MockTransport(_handler), **{
-            k: v for k, v in kwargs.items() if k != "transport"
-        })
+        return real_client(
+            *args,
+            transport=httpx.MockTransport(_handler),
+            **{k: v for k, v in kwargs.items() if k != "transport"},
+        )
 
     monkeypatch.setattr(server_mod.httpx, "Client", spy)
 
@@ -195,19 +197,24 @@ def test_constructed_client_timeout_derives_from_backstop(monkeypatch) -> None:
     assert captured["timeout"] == 30.0
 
 
-def test_constructed_client_has_no_timeout_without_backstop(monkeypatch) -> None:
+def test_constructed_client_has_no_timeout_without_backstop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # No backstop configured => no request timeout, preserving the
     # "slow-but-working call must not be killed" guarantee.
-    import strata_mcp.server as server_mod
 
     captured: dict[str, object] = {}
     real_client = httpx.Client
 
-    def spy(*args, **kwargs):
+    # Spying on httpx.Client calls: the kwargs carry the timeout under test,
+    # and Any is the honest type for a passthrough monkeypatch.
+    def spy(*args: Any, **kwargs: Any) -> httpx.Client:
         captured["timeout"] = kwargs.get("timeout", "<unset>")
-        return real_client(*args, transport=httpx.MockTransport(_handler), **{
-            k: v for k, v in kwargs.items() if k != "transport"
-        })
+        return real_client(
+            *args,
+            transport=httpx.MockTransport(_handler),
+            **{k: v for k, v in kwargs.items() if k != "transport"},
+        )
 
     monkeypatch.setattr(server_mod.httpx, "Client", spy)
 

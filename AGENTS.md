@@ -15,15 +15,19 @@ how to install it, configure it, and the `delegate_task` tool contract, read
 
 ```bash
 uv run ruff check .
+uv run pyrefly check
 uv run pytest
 ```
 
-Both must pass. Fix what you touched; do not disable rules to go green.
+All three must pass. Fix what you touched; do not disable rules to go green.
 
 ## Code conventions
 
 - Ruff enforces them (config in `pyproject.toml`): complexity capped via C901
   (max 10), import sorting, pyupgrade, bugbear, and `TRY003`.
+- Types checked by pyrefly (config in `pyproject.toml`, strict preset; run
+  `uv run pyrefly check`). OpenAI wire payloads use the shared `WireObject`
+  alias from `client.py` — arbitrary JSON values validated at each use site.
 - Raise explicit, named exceptions (see `errors.py`); do not pass long message
   strings to a bare `ValueError`/`Exception` at the raise site (TRY003).
 - Type-hint everything. Model data with pydantic, not hand-rolled classes.

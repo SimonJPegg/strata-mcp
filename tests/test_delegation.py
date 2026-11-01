@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import json as json_mod
 import time
+from collections.abc import Callable
 
 import httpx
+import pytest
 from loguru import logger
 
-from strata_mcp.client import StrataClient
+from strata_mcp.client import StrataClient, WireObject
 from strata_mcp.config import StrataConfig
 from strata_mcp.delegation import run_delegation
 from strata_mcp.mapping import MARKER_BLOCKED, MARKER_COMPLETED
 from strata_mcp.result import WorkerStatus
 
 
-def _client(handler) -> StrataClient:
+def _client(handler: Callable[[httpx.Request], httpx.Response]) -> StrataClient:
     transport = httpx.MockTransport(handler)
     config = StrataConfig(model_context_size=65536)
     return StrataClient(config, httpx.Client(transport=transport))
@@ -78,8 +81,6 @@ def test_context_is_included_in_user_message() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "m"}]})
-        import json as json_mod
-
         body = json_mod.loads(request.content)
         seen["user"] = body["messages"][1]["content"]
         return httpx.Response(
@@ -105,9 +106,7 @@ def test_oversized_context_returns_error_without_calling_strata() -> None:
     config = StrataConfig(model_context_size=4)
     client = StrataClient(config, httpx.Client(transport=transport))
 
-    result = run_delegation(
-        client, config, task="x" * 500, context="y" * 500
-    )
+    result = run_delegation(client, config, task="x" * 500, context="y" * 500)
 
     assert result.status is WorkerStatus.ERROR
     assert result.error is not None
@@ -164,3 +163,42 @@ def test_heartbeat_logged_for_a_slow_call() -> None:
         logger.remove(sink_id)
 
     assert any("still running" in m for m in messages)
+
+
+@pytest.mark.parametrize(
+    ("failing_path", "status"),
+    [("/v1/models", 500), ("/v1/models", 401), ("/v1/chat/completions", 500)],
+)
+def test_engine_failure_at_either_stage_returns_an_error_envelope(
+    failing_path: str, status: int
+) -> None:
+    # Discovery and completion are different calls that can each fail: neither
+    # may raise to the caller, and both must say what went wrong.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == failing_path:
+            return httpx.Response(status, json={"error": "engine"})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    result = run_delegation(_client(handler), _config(), "t", "")
+
+    assert result.status is WorkerStatus.ERROR
+    assert result.error is not None
+    assert not result.output
+
+
+@pytest.mark.parametrize(
+    "unusable_body",
+    [{"no_data": []}, {"data": ["bare-string"]}, {"choices": [{"oops": {}}]}],
+)
+def test_unusable_engine_body_returns_an_error_envelope(unusable_body: WireObject) -> None:
+    # A misbehaving engine is data, not a crash: a body the parser cannot read
+    # ends the delegation as an error envelope rather than a KeyError.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=unusable_body)
+
+    result = run_delegation(_client(handler), _config(), "t", "")
+
+    assert result.status is WorkerStatus.ERROR
+    assert result.error is not None

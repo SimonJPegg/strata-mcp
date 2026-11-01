@@ -143,3 +143,84 @@ def test_write_file_op_records_written_path(tmp_path: Path) -> None:
     outcome = write_file_op(str(target), "x", [str(tmp_path)])
 
     assert outcome.written_path == str(target.resolve())
+
+
+def test_read_file_op_missing_file_is_a_refusal(tmp_path: Path) -> None:
+    outcome = read_file_op(str(tmp_path / "nope.txt"), [str(tmp_path)])
+
+    assert outcome.ok is False
+    assert outcome.content == ""
+    assert outcome.error is not None
+
+
+def test_read_file_op_directory_target_is_a_refusal(tmp_path: Path) -> None:
+    # A directory passes the fence, so the read itself must fail as data.
+    outcome = read_file_op(str(tmp_path), [str(tmp_path)])
+
+    assert outcome.ok is False
+    assert outcome.content == ""
+    assert outcome.error is not None
+
+
+@pytest.mark.parametrize(
+    ("name", "raw"),
+    [
+        ("latin1.bin", b"\xff\xfe\x00not utf-8"),
+        ("utf16.txt", "encoded".encode("utf-16")),
+        ("lone_lead_byte.bin", b"\xe2\x28\xa1"),  # invalid UTF-8 sequence
+    ],
+)
+def test_read_file_op_undecodable_bytes_is_a_refusal(tmp_path: Path, name: str, raw: bytes) -> None:
+    # UnicodeDecodeError subclasses ValueError, not OSError: had the read only
+    # caught OSError, a binary file would raise out of the tool loop and abort
+    # the delegation. Failures are data, so the worker must be told instead.
+    (tmp_path / name).write_bytes(raw)
+
+    outcome = read_file_op(str(tmp_path / name), [str(tmp_path)])
+
+    assert outcome.ok is False
+    assert outcome.content == ""
+    assert outcome.error is not None
+
+
+def test_read_file_op_without_grant_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "f.txt").write_text("x", encoding="utf-8")
+
+    outcome = read_file_op(str(tmp_path / "f.txt"), [])
+
+    assert outcome.ok is False
+    assert outcome.content == ""
+    assert outcome.error is not None
+
+
+def test_write_file_op_without_grant_is_refused(tmp_path: Path) -> None:
+    target = tmp_path / "f.txt"
+
+    outcome = write_file_op(str(target), "x", [])
+
+    assert outcome.ok is False
+    assert outcome.written_path is None
+    assert not target.exists()
+
+
+def test_write_file_op_over_existing_directory_is_a_refusal(tmp_path: Path) -> None:
+    target = tmp_path / "dir"
+    target.mkdir()
+
+    outcome = write_file_op(str(target), "x", [str(tmp_path)])
+
+    assert outcome.ok is False
+    assert outcome.written_path is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_write_file_op_unwritable_path_is_a_refusal(tmp_path: Path) -> None:
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+
+    outcome = write_file_op(str(locked / "x.txt"), "x", [str(tmp_path)])
+
+    assert outcome.ok is False
+    assert outcome.written_path is None
+    assert not (locked / "x.txt").exists()

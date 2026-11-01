@@ -27,6 +27,9 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Types
+        run: uv run pyrefly check
+
       - name: Test
         # The live Strata integration tests are gated behind STRATA_MCP_IT and
         # skip here; CI runs the mocked unit suite only.

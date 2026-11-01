@@ -46,29 +46,31 @@ def _resolve_cwd(cwd: str | None, write_dirs_allowed: list[str]) -> Path:
     return resolve_within(requested, write_dirs_allowed)
 
 
-def _execute(command: str, workdir: Path, timeout_s: int) -> CommandOutcome:
-    """Run argv with shell=False, turning timeout and OSError into refusals, not raises."""
-    try:
-        argv = shlex.split(command)
-    except ValueError as exc:
-        # An unbalanced quote or trailing backslash in the approved string is a
-        # refusal, not a crash: failures are data in this runner.
-        return _refusal(command, f"could not parse command: {exc}")
-    try:
-        completed = subprocess.run(
-            argv,
-            shell=False,
-            cwd=str(workdir),
-            env=dict(_SCRUBBED_ENV),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return _refusal(command, f"timed out after {timeout_s}s")
-    except OSError as exc:
-        return _refusal(command, f"execution failed: {exc}")
+def _parse_argv(command: str) -> list[str]:
+    """Split an approved command into argv without a shell; raises ValueError on bad quoting."""
+    return shlex.split(command)
+
+
+def _run_argv(argv: list[str], workdir: Path, timeout_s: int) -> subprocess.CompletedProcess[str]:
+    """Execute argv with no shell and a scrubbed environment, capturing output.
+
+    The environment is rebuilt from the allowlist so the worker cannot inherit
+    secrets (e.g. an API key) from the host process.
+    """
+    return subprocess.run(
+        argv,
+        shell=False,
+        cwd=str(workdir),
+        env=dict(_SCRUBBED_ENV),
+        capture_output=True,
+        text=True,
+        timeout=timeout_s,
+        check=False,
+    )
+
+
+def _completed_outcome(command: str, completed: subprocess.CompletedProcess[str]) -> CommandOutcome:
+    """Wrap a finished run in an ok outcome, keeping its exit code."""
     return CommandOutcome(
         ok=True,
         stdout=completed.stdout,
@@ -76,6 +78,36 @@ def _execute(command: str, workdir: Path, timeout_s: int) -> CommandOutcome:
         exit_code=completed.returncode,
         command=command,
     )
+
+
+def _execute(command: str, workdir: Path, timeout_s: int) -> CommandOutcome:
+    """Run argv with shell=False, turning timeout and OSError into refusals, not raises."""
+    try:
+        argv = _parse_argv(command)
+    except ValueError as exc:
+        # An unbalanced quote or trailing backslash in the approved string is a
+        # refusal, not a crash: failures are data in this runner.
+        return _refusal(command, f"could not parse command: {exc}")
+    try:
+        completed = _run_argv(argv, workdir, timeout_s)
+    except subprocess.TimeoutExpired:
+        return _refusal(command, f"timed out after {timeout_s}s")
+    except OSError as exc:
+        return _refusal(command, f"execution failed: {exc}")
+    return _completed_outcome(command, completed)
+
+
+def _grant_refusal(
+    command: str,
+    allowed_commands: list[str],
+    write_dirs_allowed: list[str],
+) -> str | None:
+    """Return why the caller's grants do not allow this command, or None if they do."""
+    if command not in allowed_commands:
+        return f"command not in allowed list: {command!r}"
+    if not write_dirs_allowed:
+        return "no write dirs granted for command cwd"
+    return None
 
 
 def run_command_op(
@@ -87,10 +119,9 @@ def run_command_op(
     cwd: str | None = None,
 ) -> CommandOutcome:
     """Run a caller-approved command only on exact string match, never raising at the caller."""
-    if command not in allowed_commands:
-        return _refusal(command, f"command not in allowed list: {command!r}")
-    if not write_dirs_allowed:
-        return _refusal(command, "no write dirs granted for command cwd")
+    refusal = _grant_refusal(command, allowed_commands, write_dirs_allowed)
+    if refusal is not None:
+        return _refusal(command, refusal)
     try:
         workdir = _resolve_cwd(cwd, write_dirs_allowed)
     except PathNotAllowedError as exc:

@@ -1,6 +1,6 @@
 [project]
 name = "strata-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server that delegates scoped tasks to a local Strata-backed worker"
 readme = "README.md"
 authors = [
@@ -24,6 +24,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",
+    "pyrefly>=1.4.0,<2",
     "ruff>=0.17.3",
 ]
 
@@ -42,6 +43,13 @@ select = ["E", "F", "I", "C90", "TRY", "UP", "B", "SIM"]
 [tool.ruff.lint.mccabe]
 # C901: flag functions whose cyclomatic complexity exceeds 10.
 max-complexity = 10
+
+[tool.pyrefly]
+# Meta's Rust type checker; strict preset per the house standard. Covers the
+# same tree ruff does so types and lint stay in lockstep.
+project-includes = ["src", "tests"]
+python-version = "3.14"
+preset = "strict"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

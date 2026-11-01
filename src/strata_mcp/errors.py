@@ -71,9 +71,7 @@ class OversizedContextError(StrataClientError):
     """Raised when task+context exceed the declared model context size."""
 
     def __init__(self, estimated_tokens: int, limit: int) -> None:
-        super().__init__(
-            f"estimated {estimated_tokens} tokens exceed model context size {limit}"
-        )
+        super().__init__(f"estimated {estimated_tokens} tokens exceed model context size {limit}")
 
 
 class RuntimeBackstopError(StrataClientError):

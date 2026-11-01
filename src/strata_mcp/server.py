@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -41,6 +43,27 @@ def _resolve_config_path() -> Path:
     return base / "strata-mcp" / "config.toml"
 
 
+@contextmanager
+def _strata_client(
+    http_client: httpx.Client | None, config: StrataConfig
+) -> Iterator[StrataClient]:
+    """Yield a StrataClient, closing an internally created httpx client on exit.
+
+    An injected client is left alone: the caller owns its lifecycle and may reuse
+    it across delegations. The timeout of a client we create derives from the
+    runtime backstop, so a hung request aborts rather than running on after the
+    caller has been told error. With no backstop configured there is no request
+    timeout: a slow-but-working local generation must not be killed.
+    """
+    owns_client = http_client is None
+    client_to_use = http_client or httpx.Client(timeout=config.max_runtime_s)
+    try:
+        yield StrataClient(config, client_to_use)
+    finally:
+        if owns_client:
+            client_to_use.close()
+
+
 def delegate_task_impl(
     config: StrataConfig,
     task: str,
@@ -64,15 +87,7 @@ def delegate_task_impl(
     fenced run_command tool for those exact commands; it needs a write dir for
     the command cwd. With no grants, the worker is text-only.
     """
-    owns_client = http_client is None
-    # Bound a single hung request to the runtime backstop so an overrunning
-    # request actually aborts instead of running on after the caller is told
-    # error. When no backstop is configured, there is no request timeout: a
-    # slow-but-working local generation must not be killed. The thread backstop
-    # still bounds the whole delegation across multiple tool-loop requests.
-    client_to_use = http_client or httpx.Client(timeout=config.max_runtime_s)
-    try:
-        client = StrataClient(config, client_to_use)
+    with _strata_client(http_client, config) as client:
         result = run_delegation(
             client,
             config,
@@ -86,24 +101,13 @@ def delegate_task_impl(
             allowed_commands=allowed_commands,
             max_command_timeout_s=max_command_timeout_s,
         )
-    finally:
-        if owns_client:
-            client_to_use.close()
     return DelegateTaskResult(result=result, model_context_size=config.model_context_size)
 
 
-def list_models_impl(
-    config: StrataConfig, http_client: httpx.Client | None = None
-) -> list[str]:
+def list_models_impl(config: StrataConfig, http_client: httpx.Client | None = None) -> list[str]:
     """Return the available model ids from the inference engine."""
-    owns_client = http_client is None
-    # Same backstop-derived timeout as delegation; None stays unbounded.
-    client_to_use = http_client or httpx.Client(timeout=config.max_runtime_s)
-    try:
-        return StrataClient(config, client_to_use).discover_models()
-    finally:
-        if owns_client:
-            client_to_use.close()
+    with _strata_client(http_client, config) as client:
+        return client.discover_models()
 
 
 def build_server(config: StrataConfig) -> MCPServer:
@@ -154,9 +158,7 @@ def build_server(config: StrataConfig) -> MCPServer:
             max_command_timeout_s=max_command_timeout_s,
         )
 
-    @server.tool(
-        description="List available model ids to choose from for delegate_task."
-    )
+    @server.tool(description="List available model ids to choose from for delegate_task.")
     def list_models() -> list[str]:
         """Return the available model ids."""
         return list_models_impl(config)

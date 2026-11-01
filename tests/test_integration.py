@@ -19,6 +19,7 @@ import json as json_mod
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -26,8 +27,9 @@ import pytest
 from strata_mcp.client import StrataClient
 from strata_mcp.config import StrataConfig
 from strata_mcp.delegation import run_delegation
-from strata_mcp.result import WorkerStatus
-from strata_mcp.server import delegate_task_impl
+from strata_mcp.result import ReasoningEffort, WorkerStatus
+from strata_mcp.server import delegate_task_impl, list_models_impl
+from strata_mcp.tools import make_dispatch
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("STRATA_MCP_IT") != "1",
@@ -46,7 +48,9 @@ def _api_key() -> str | None:
 
 
 def _config(**overrides: object) -> StrataConfig:
-    params: dict[str, object] = {
+    # Unpacked kwargs into the pydantic constructor: keys name specific fields,
+    # so Any per key is the honest granularity, not a lazy catch-all.
+    params: dict[str, Any] = {
         "base_url": _base_url(),
         "model_context_size": int(os.environ.get("STRATA_IT_CONTEXT", "65536")),
         "api_key": _api_key(),
@@ -68,9 +72,7 @@ def test_model_discovery_returns_real_ids() -> None:
 
 
 def test_delegation_returns_a_valid_envelope() -> None:
-    response = delegate_task_impl(
-        _config(), task="Reply with exactly the word: pong", context=""
-    )
+    response = delegate_task_impl(_config(), task="Reply with exactly the word: pong", context="")
 
     # Deterministic invariants of our code, not the model's text.
     assert response.result.status in _VALID_STATUSES
@@ -81,9 +83,7 @@ def test_delegation_returns_a_valid_envelope() -> None:
 
 
 def test_real_engine_populates_token_usage() -> None:
-    result = run_delegation(
-        _client(_config()), _config(), task="Reply with: ok", context=""
-    )
+    result = run_delegation(_client(_config()), _config(), task="Reply with: ok", context="")
 
     assert result.status is not WorkerStatus.ERROR
     assert result.token_usage is not None
@@ -152,8 +152,6 @@ def test_oversized_context_never_contacts_strata() -> None:
 
 
 def test_list_models_and_explicit_model_delegation() -> None:
-    from strata_mcp.server import delegate_task_impl, list_models_impl
-
     config = _config()
     http = httpx.Client(timeout=None)
     try:
@@ -172,9 +170,6 @@ def test_list_models_and_explicit_model_delegation() -> None:
 
 
 def test_reasoning_effort_none_reduces_tokens() -> None:
-    from strata_mcp.result import ReasoningEffort
-    from strata_mcp.server import delegate_task_impl
-
     config = _config()
     task = "What is 17 + 25? Answer with just the number."
 
@@ -201,10 +196,6 @@ def test_file_tools_fence_holds_against_live_worker(tmp_path: Path) -> None:
     sits inside the granted directory — the fence is never escaped, whatever the
     worker did.
     """
-    import os
-
-    from strata_mcp.server import delegate_task_impl
-
     box = tmp_path / "box"
     box.mkdir()
     (box / "seed.txt").write_text("the secret word is plum", encoding="utf-8")
@@ -231,8 +222,6 @@ def test_file_tools_fence_holds_against_live_worker(tmp_path: Path) -> None:
 def test_file_tools_refuse_outside_fence_is_deterministic(tmp_path: Path) -> None:
     """The fence refusal does not depend on the model: the dispatcher refuses
     an out-of-fence path directly."""
-    from strata_mcp.tools import make_dispatch
-
     box = tmp_path / "box"
     box.mkdir()
     outside = tmp_path / "outside"
@@ -281,8 +270,6 @@ def test_command_tool_runs_through_the_stack(tmp_path: Path) -> None:
 def test_command_tool_refuses_off_menu_is_deterministic(tmp_path: Path) -> None:
     """The off-menu refusal does not depend on the model: the dispatcher refuses
     a command not in the granted menu directly."""
-    from strata_mcp.tools import make_dispatch
-
     box = tmp_path / "box"
     box.mkdir()
 

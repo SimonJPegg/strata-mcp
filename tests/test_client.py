@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json as json_mod
+from collections.abc import Callable
+from typing import Any
+
 import httpx
 import pytest
 
-from strata_mcp.client import StrataClient
+from strata_mcp.client import StrataClient, WireObject
 from strata_mcp.config import StrataConfig
 from strata_mcp.errors import (
     CompletionResponseError,
@@ -14,7 +18,10 @@ from strata_mcp.errors import (
 )
 
 
-def _client(handler, api_key: str | None = None) -> StrataClient:
+def _client(
+    handler: Callable[[httpx.Request], httpx.Response],
+    api_key: str | None = None,
+) -> StrataClient:
     config = StrataConfig(model_context_size=4096, api_key=api_key)
     transport = httpx.MockTransport(handler)
     return StrataClient(config, httpx.Client(transport=transport))
@@ -53,8 +60,6 @@ def test_requests_include_bearer_header_with_key() -> None:
 
 
 def test_completion_request_shape() -> None:
-    import json as json_mod
-
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/chat/completions"
         assert request.method == "POST"
@@ -72,8 +77,6 @@ def test_completion_request_shape() -> None:
 
 
 def test_completion_sends_configured_temperature() -> None:
-    import json as json_mod
-
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "m"}]})
@@ -87,8 +90,6 @@ def test_completion_sends_configured_temperature() -> None:
 
 
 def test_completion_defaults_to_zero_temperature() -> None:
-    import json as json_mod
-
     def handler(request: httpx.Request) -> httpx.Response:
         body = json_mod.loads(request.content)
         assert body["temperature"] == 0.0
@@ -98,8 +99,6 @@ def test_completion_defaults_to_zero_temperature() -> None:
 
 
 def test_completion_sends_reasoning_effort_when_set() -> None:
-    import json as json_mod
-
     def handler(request: httpx.Request) -> httpx.Response:
         body = json_mod.loads(request.content)
         assert body["reasoning_effort"] == "none"
@@ -109,8 +108,6 @@ def test_completion_sends_reasoning_effort_when_set() -> None:
 
 
 def test_completion_omits_reasoning_effort_when_unset() -> None:
-    import json as json_mod
-
     def handler(request: httpx.Request) -> httpx.Response:
         body = json_mod.loads(request.content)
         assert "reasoning_effort" not in body
@@ -190,3 +187,76 @@ def test_completion_malformed_body_maps_to_response_error() -> None:
 
     with pytest.raises(CompletionResponseError):
         _client(handler).complete("m", "sys", "q")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"no_data": []},  # no 'data' key at all
+        {"data": {"id": "m"}},  # 'data' is a mapping, not the advertised list
+        {"data": [{"name": "unnamed"}]},  # entry carries no id
+        {"data": [{"id": ""}]},  # an empty id cannot be selected
+        {"data": [{"id": 7}]},  # id is not a string
+        {"data": ["bare-string"]},  # entry is not a mapping
+    ],
+)
+def test_discovery_rejects_unusable_model_entries(body: WireObject) -> None:
+    # Every engine is a peer: an unusable body is a typed discovery failure,
+    # never a KeyError or AttributeError escaping to the caller.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    with pytest.raises(ModelDiscoveryError):
+        _client(handler).discover_models()
+
+
+def test_discovery_bad_status_wins_over_body_shape() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": "bad request"})
+
+    with pytest.raises(ModelDiscoveryError):
+        _client(handler).discover_models()
+
+
+def test_completion_bad_status_maps_to_response_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="engine down")
+
+    with pytest.raises(CompletionResponseError):
+        _client(handler).complete("m", "sys", "q")
+
+
+@pytest.mark.parametrize("content", [None, 7, ["chunk"], "   \n\t "])
+def test_completion_rejects_unusable_content(content: Any) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    with pytest.raises(CompletionResponseError):
+        _client(handler).complete("m", "sys", "q")
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        "not-a-mapping",
+        None,
+        {"prompt_tokens": 5},  # completion count missing
+        {"prompt_tokens": "5", "completion_tokens": 6},  # counts not ints
+    ],
+)
+def test_completion_ignores_unusable_usage(usage: Any) -> None:
+    # Usage is advisory: an unusable shape must not fail an otherwise good
+    # completion, and must not invent a token count either.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "answer"}}],
+                "usage": usage,
+            },
+        )
+
+    result = _client(handler).complete("m", "sys", "q")
+
+    assert result.output == "answer"
+    assert result.token_usage is None

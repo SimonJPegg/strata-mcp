@@ -9,7 +9,7 @@ from collections.abc import Callable
 
 from loguru import logger
 
-from strata_mcp.client import StrataClient
+from strata_mcp.client import StrataClient, ToolDispatch, ToolLoopResult, WireObject
 from strata_mcp.config import StrataConfig
 from strata_mcp.errors import (
     CommandsNeedWriteDirError,
@@ -48,6 +48,42 @@ def _estimated_tokens(text: str) -> int:
     return len(text) // _CHARS_PER_TOKEN
 
 
+def _capture_work(
+    work: Callable[[], WorkerResult],
+    results: list[WorkerResult],
+    failures: list[BaseException],
+) -> Callable[[], None]:
+    """Build the thread target that records work()'s result or its failure.
+
+    The exception is stashed rather than raised so it can be re-raised on the
+    main thread, where the heartbeat loop is not left waiting on a dead thread.
+    """
+
+    def _target() -> None:
+        try:
+            results.append(work())
+        except BaseException as exc:  # re-raised by the caller below
+            failures.append(exc)
+
+    return _target
+
+
+def _await_thread(
+    thread: threading.Thread,
+    start: float,
+    heartbeat_s: float,
+    max_runtime_s: float | None,
+) -> None:
+    """Join the worker thread in slices, logging elapsed time and enforcing the cap."""
+    while thread.is_alive():
+        thread.join(timeout=heartbeat_s)
+        elapsed = time.monotonic() - start
+        if thread.is_alive():
+            logger.info("delegate_task still running ({:.0f}s elapsed)", elapsed)
+        if max_runtime_s is not None and elapsed >= max_runtime_s and thread.is_alive():
+            raise RuntimeBackstopError(max_runtime_s)
+
+
 def _run_with_heartbeat(
     work: Callable[[], WorkerResult],
     heartbeat_s: float,
@@ -58,30 +94,74 @@ def _run_with_heartbeat(
     The worker call is blocking, so it runs in a thread; the main thread logs
     elapsed time periodically and applies the optional runtime backstop.
     """
-    result: list[WorkerResult] = []
-    failure: list[BaseException] = []
+    results: list[WorkerResult] = []
+    failures: list[BaseException] = []
 
-    def _target() -> None:
-        try:
-            result.append(work())
-        except BaseException as exc:  # re-raised on the main thread below
-            failure.append(exc)
-
-    thread = threading.Thread(target=_target, daemon=True)
+    thread = threading.Thread(target=_capture_work(work, results, failures), daemon=True)
     start = time.monotonic()
     thread.start()
+    _await_thread(thread, start, heartbeat_s, max_runtime_s)
 
-    while thread.is_alive():
-        thread.join(timeout=heartbeat_s)
-        elapsed = time.monotonic() - start
-        if thread.is_alive():
-            logger.info("delegate_task still running ({:.0f}s elapsed)", elapsed)
-        if max_runtime_s is not None and elapsed >= max_runtime_s and thread.is_alive():
-            raise RuntimeBackstopError(max_runtime_s)
+    if failures:
+        raise failures[0]
+    return results[0]
 
-    if failure:
-        raise failure[0]
-    return result[0]
+
+def _chosen_model(client: StrataClient, model: str | None) -> str:
+    """Use the caller's chosen model, else the first model Strata advertises."""
+    if model:
+        return model
+    return client.discover_models()[0]
+
+
+def _text_worker_result(
+    client: StrataClient,
+    chosen: str,
+    system_prompt: str,
+    user_content: str,
+    effort: str | None,
+) -> WorkerResult:
+    """Run the text-only path: one completion, mapped to an envelope."""
+    completion = client.complete(chosen, system_prompt, user_content, effort)
+    return WorkerResult(
+        status=status_from_output(completion.output),
+        output=completion.output,
+        token_usage=completion.token_usage,
+    )
+
+
+def _tool_worker_result(
+    client: StrataClient,
+    chosen: str,
+    system_prompt: str,
+    user_content: str,
+    tools: list[WireObject],
+    dispatch: ToolDispatch,
+    max_tool_rounds: int,
+    effort: str | None,
+) -> WorkerResult:
+    """Run the fenced tool loop and map its outcome to an envelope."""
+    loop = client.complete_with_tools(
+        chosen, system_prompt, user_content, tools, dispatch, max_tool_rounds, effort
+    )
+    if loop.hit_round_cap:
+        return _round_cap_envelope(loop)
+    return WorkerResult(
+        status=status_from_output(loop.output),
+        output=loop.output,
+        files_written=loop.written_paths,
+        commands_run=loop.commands_run,
+    )
+
+
+def _round_cap_envelope(loop: ToolLoopResult) -> WorkerResult:
+    """Out of rounds is a blocked state, not a transport error: ask the caller for more."""
+    return WorkerResult(
+        status=WorkerStatus.NEEDS_INPUT,
+        output=f"stopped after {loop.rounds_used} tool rounds without finishing",
+        files_written=loop.written_paths,
+        commands_run=loop.commands_run,
+    )
 
 
 def run_delegation(
@@ -102,8 +182,8 @@ def run_delegation(
 
     Guards oversized context, selects the model, and runs the worker. When the
     caller grants file directories or a command menu, the worker runs a bounded
-    tool-use loop with fenced read_file/write_file/run_command; otherwise it is a
-    single text-only completion. All failures become an error envelope rather
+    tool-use loop with fenced read_file/write_file/run_command; otherwise it is
+    a single text-only completion. All failures become an error envelope rather
     than propagating.
     """
     read_dirs = read_dirs_allowed or []
@@ -121,30 +201,24 @@ def run_delegation(
     if commands and not write_dirs:
         # Commands always run inside a fenced working directory, so a command
         # menu with no write dir has nowhere safe to run; refuse up front.
-        exc = CommandsNeedWriteDirError()
         return WorkerResult(
             status=WorkerStatus.ERROR,
             elapsed_s=time.monotonic() - start,
-            error=str(exc),
+            error=str(CommandsNeedWriteDirError()),
         )
 
     oversized = _oversized_result(system_prompt, user_content, config, start)
     if oversized is not None:
         return oversized
 
-    tools = build_tools(read_dirs, write_dirs, commands)
-
     def _work() -> WorkerResult:
-        chosen = model if model else client.discover_models()[0]
+        chosen = _chosen_model(client, model)
         effort = reasoning_effort.value if reasoning_effort else None
+        tools = build_tools(read_dirs, write_dirs, commands)
         if not tools:
-            completion = client.complete(chosen, system_prompt, user_content, effort)
-            return WorkerResult(
-                status=status_from_output(completion.output),
-                output=completion.output,
-                token_usage=completion.token_usage,
-            )
-        loop = client.complete_with_tools(
+            return _text_worker_result(client, chosen, system_prompt, user_content, effort)
+        return _tool_worker_result(
+            client,
             chosen,
             system_prompt,
             user_content,
@@ -153,28 +227,19 @@ def run_delegation(
             max_tool_rounds,
             effort,
         )
-        if loop.hit_round_cap:
-            # The worker ran out of rounds without a final answer. That is a
-            # blocked state, not a transport error: report needs_input so the
-            # caller can give more budget or narrow the task.
-            return WorkerResult(
-                status=WorkerStatus.NEEDS_INPUT,
-                output=f"stopped after {loop.rounds_used} tool rounds without finishing",
-                files_written=loop.written_paths,
-                commands_run=loop.commands_run,
-            )
-        return WorkerResult(
-            status=status_from_output(loop.output),
-            output=loop.output,
-            files_written=loop.written_paths,
-            commands_run=loop.commands_run,
-        )
 
     try:
         result = _run_with_heartbeat(_work, heartbeat_s, config.max_runtime_s)
-    except (StrataClientError, RuntimeBackstopError) as exc:
+    except StrataClientError as exc:
+        # Covers every Strata failure, including the runtime backstop: a
+        # delegation that overran its cap is an error envelope, not a raise.
         return error_result(exc, elapsed_s=time.monotonic() - start)
 
+    return _stamp_elapsed(result, start)
+
+
+def _stamp_elapsed(result: WorkerResult, start: float) -> WorkerResult:
+    """Stamp the finished delegation with its wall-clock time without mutating the input."""
     return result.model_copy(update={"elapsed_s": time.monotonic() - start})
 
 
@@ -188,9 +253,7 @@ def _oversized_result(
     estimated = _estimated_tokens(system_prompt) + _estimated_tokens(user_content)
     if estimated <= config.model_context_size:
         return None
-    exc = OversizedContextError(estimated, config.model_context_size)
-    return WorkerResult(
-        status=WorkerStatus.ERROR,
+    return error_result(
+        OversizedContextError(estimated, config.model_context_size),
         elapsed_s=time.monotonic() - start,
-        error=str(exc),
     )
