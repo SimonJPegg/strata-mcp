@@ -3,27 +3,22 @@
 An MCP server that hands a scoped task to a local model and returns a structured
 result.
 
-Intended to be run from within Kiro/ClaudeCode/OpenCode/Whatever. Plan and chat with
-the expensive LLM, pass the grunt work to the free (*cough* electric *cough*) one.
+Run it from Kiro, Claude Code, OpenCode, whatever. Chat with the expensive model.
+Pass the grunt work to the free one. (*cough* electric *cough*)
 
-Your local model is slower, but that's the price you pay.  Tested on Kiro, it works,
-but, it doesn't show status updates, so it's impossible to tell a long task from a stuck one.
-
-The worker is text-only by default. Grant it directories per call and it can
-read and write files inside them, fenced (see File tools). It never runs
-commands.
+Tested on Kiro. It works, but Kiro doesn't show status updates, so a long task looks identical to a stuck one.
 
 ## Prerequisites
 
 - [`uv`](https://docs.astral.sh/uv/) for dependency management.
-- A running Strata server with a model loaded, reachable over its
-  OpenAI-compatible API. For example:
+- A running inference backend with a model loaded, reachable over an
+  OpenAI-compatible API. Strata, for example:
 
   ```bash
   strata launch --family qwen --model q2_0 --context 32k --yes --no-tui
   ```
 
-  Check it is up, and note the address, model, and whether a key is required:
+  Check it is up. Note the address, the model, and whether a key is required:
 
   ```bash
   curl -fsS http://127.0.0.1:8080/health
@@ -52,45 +47,48 @@ pipx install "git+https://github.com/simonjpegg/strata-mcp.git"
 
 ## Configure
 
-The server reads a TOML config file, discovered in this order:
+The server reads a TOML config file. It looks here:
 
-1. the path in `STRATA_MCP_CONFIG`, if set
-2. otherwise `~/.config/strata-mcp/config.toml` (honouring `XDG_CONFIG_HOME`)
+1. `STRATA_MCP_CONFIG`, if set.
+2. Otherwise `~/.config/strata-mcp/config.toml` (honouring `XDG_CONFIG_HOME`).
 
 ```toml
-# ~/.config/strata-mcp/config.toml  (or the path in STRATA_MCP_CONFIG)
-# Strata's OpenAI-compatible base URL (default shown).
-base_url = "http://127.0.0.1:8080/v1"
+# ~/.config/strata-mcp/config.toml
+# Backend provider. Picks the default URL and required headers.
+# Allowed: strata | ollama | opencode-go
+provider = "strata"
 
-# The context length Strata was launched with (its --context value).
-# Surfaced to the caller so it can budget how much to send. Advisory.
+# The provider's OpenAI-compatible base URL. Only override if your backend
+# listens somewhere else.
+# base_url = "http://127.0.0.1:8080/v1"
+
+# Context length the loaded model was launched with. Advisory.
 model_context_size = 32768
 
-# Optional safety backstop in seconds. Omit for no time limit.
+# Safety backstop in seconds. Omit for no wall-clock limit.
 # max_runtime_s = 3600
 
-# Optional sampling temperature on every completion (0.0-2.0). Defaults to 0.0
-# so the worker is literal. 0.0 removes sampling randomness but does not
-# guarantee identical output on MoE models, whose expert routing still varies.
+# Sampling temperature (0.0-2.0). Defaults to 0.0 so the worker is literal.
+# 0.0 removes randomness but doesn't guarantee identical output on MoE models.
 # temperature = 0.0
 
-# Required only when Strata runs with a key (its /health reports
-# "api_key": true, and /v1/models returns 401 without one).
-# api_key = "your-strata-api-key"
+# Required for opencode-go. Also required when Strata runs with a key
+# (/health reports "api_key": true, or /v1/models returns 401).
+# api_key = "your-api-key"
 ```
 
-The model id is discovered from `GET /v1/models`. You do not configure it.
+The model id comes from `GET /v1/models`. You don't configure it. `provider`
+defaults to `strata`, so existing config files keep working.
 
 ## Run
 
-Installed, with a config file at the discovered location, it runs as a plain
-command speaking MCP over stdio:
+Installed, with a config file at the discovered location:
 
 ```bash
 strata-mcp
 ```
 
-From a checkout, or to point at a specific config file:
+From a checkout, or to point at a specific config:
 
 ```bash
 STRATA_MCP_CONFIG=./config.toml uv run strata-mcp
@@ -128,18 +126,14 @@ From a checkout, use `uv run` and set `STRATA_MCP_CONFIG`:
 
 ## Recommended agent configs
 
-Registering the server is half the job. The host agent also has to reach for it.
-The `agents/` folder has starting configs that register strata-mcp and steer the
-agent to delegate bounded grunt work rather than burn its own context on it:
+Recomended agent configs exist in `agents/`:
 
-- `agents/kiro-agent.json` — a Kiro agent that registers the server and carries
-  a prompt biasing it toward `delegate_task` for bounded work.
+- `agents/kiro-agent.json` — a Kiro agent that registers the server and biases it
+toward `delegate_task` for bounded work.
 - `agents/opencode.json` — the OpenCode `mcp` block to register the server.
 - `agents/opencode-AGENTS.md` — the steer to paste into your project `AGENTS.md`,
-  since OpenCode takes its usage guidance from there.
+since OpenCode takes its usage guidance from there.
 
-These bias the agent toward delegating. They do not force it. The habit lives in
-the prompt, the mechanism lives in the server.
 
 ## The `delegate_task` tool
 
@@ -152,18 +146,20 @@ delegate_task(task: str, context: str = "", model: str | None = None, reasoning_
   resource. Send the minimum.
 - `model` — optional model id (see `list_models`). Omitted, the first model the
   engine reports is used.
-- `reasoning_effort` — optional, one of `none | low | medium | high`. One
-  thinking control across backends: Strata and Ollama both honour
-  `reasoning_effort` on the OpenAI-compatible endpoint, and `none` turns the
-  reasoning phase off for fast bounded tasks. Omitted, the backend default
-  applies (thinking on). It is best-effort and depends on the model. Some ignore
-  the levels, and this Qwen treats `low` and `medium` the same.
+- `reasoning_effort` — optional level taken from the chosen model's entry in
+  `list_models`. Passed through unchanged. Omitted, the backend default applies.
+  If the backend rejects the level, the result has `status: error` and a message
+  so you can retry.
 
-  > Note: best-effort does not mean safe to send blind. A model with no thinking
-  > phase can reject any `reasoning_effort` outright. Ollama's `Qwen3-Coder`
-  > answers a plain call fine but 400s on `reasoning_effort`, and that comes back
-  > as a `status: error` result, not a silent fallback. Send it only to a model
-  > you know thinks, or leave it off.
+  This used to be a closed enum (`none | low | medium | high`). It isn't anymore.
+  Different models advertise different ladders. OpenCode Go might offer
+  `minimal`, `xhigh`, or `max`. Call `list_models` first and pick a level the
+  model actually accepts. A level set without a model applies to the first model
+  in the list, which may not advertise it.
+
+  Some backends silently clamp a level rather than reject it. A requested `max`
+  may run as `high`. The result envelope doesn't echo the applied level. Treat
+  reasoning control as best-effort.
 
 The response carries:
 
@@ -175,22 +171,34 @@ The response carries:
 ## The `list_models` tool
 
 ```
-list_models() -> list[str]
+list_models() -> list[{
+  id: str,
+  reasoning_levels: list[str],
+  reasoning_default: str | None,
+  reasoning_provenance: "advertised" | "assumed"
+}]
 ```
 
-Returns the model ids the engine reports from `/v1/models`, so the caller can
-pick one for `delegate_task`. Strata serves one model, so you get one id. Ollama
-serves many, so you get the lot and choose.
+Returns the models the engine reports from `/v1/models`, so the caller can pick
+one and a reasoning level for `delegate_task`.
+
+- `id` — the model identifier to pass to `delegate_task(model=...)`.
+- `reasoning_levels` — the levels the model accepts for `reasoning_effort`.
+- `reasoning_default` — the backend's advertised default level, when it declares one.
+- `reasoning_provenance` — `advertised` when the levels came from the backend's
+  metadata, or `assumed` when they are the provider's fallback set. Strata and
+  Ollama don't advertise per-model reasoning ladders, so they use the fallback
+  `none | low | medium | high`.
+
+Raw provider metadata is trimmed. Costs, modalities, SDK hints: none of it
+makes it into the response. Keeps the result small in the caller's context.
 
 ### A note on `model_context_size`
 
-`model_context_size` is one value you set in config. The server does not read it
-per model from the engine, on purpose. The OpenAI-compatible `/v1/models`
-endpoint does not reliably report context length. Strata gives it, Ollama does
-not and will silently truncate to an internal default. So the operator declares
-one advisory window that matches how the engine was launched. Pick a model whose
-real window differs and the configured value is still what gets surfaced and used
-for the oversized-context guard.
+`model_context_size` a value set in config. The server does not read it
+per model. The OpenAI-compatible `/v1/models` endpoint doesn't reliably report
+context length across providers. So the operator declares one advisory window
+that matches how the engine was launched. 
 
 ### Result status
 
@@ -227,8 +235,8 @@ never go to the worker. The caller judges against them after the worker returns.
 
 ## File tools
 
-By default the worker is text-only. If you want it to read or write files, you
-grant directories per call and the server fences it to them:
+By default the worker is text-only. Grant it directories per call and the server
+fences it to them:
 
 ```
 delegate_task(
@@ -249,27 +257,19 @@ delegate_task(
 The result gains `files_written`, the paths the worker actually wrote, so you can
 check the changes on disk.
 
-Read this part carefully, because it is where the blast radius lives:
 
-- The allowlist you pass **is** the blast radius. The server will let the worker
-  touch anything inside those directories and nothing outside them. Pass the
-  repo root and a confused model can scribble over the repo. Pass a scratch dir
-  and the damage is contained to the scratch dir. Choose tight.
+- The allowlist you pass **is** the blast radius. The server lets the worker
+  touch anything inside those directories and nothing outside them. 
 - The server enforces the fence on every call. It resolves the real path first,
   so `..`, symlinks, and absolute paths that point outside the granted
-  directories are refused. A refused path comes back to the worker as a failed
-  tool call, not a crash, and not a silent escape.
-- Reads are fenced too, not just writes. A worker with a read tool pointed at
-  your home directory can read your keys and leak them into its output. Grant
-  read dirs as tightly as write dirs.
-- You still validate. The worker having hands does not make it trustworthy. It
-  writes into the box you drew, you check `files_written` and the files
-  themselves, and you decide what to keep.
+  directories are refused. 
+- Reads are fenced too
+- You still validate. 
+
 
 ## Command tools
 
-You can also let the worker run commands. Not a shell — a menu. You pre-approve
-the exact commands, the worker picks from them:
+You can also let the worker run commands. An allowlist, not a shell. 
 
 ```
 delegate_task(
@@ -290,23 +290,6 @@ delegate_task(
 
 The result gains `commands_run`, each command that actually ran with its exit
 code, so you can see what happened without taking the worker's word for it.
-
-This is the tightest fence in the project, and it has to be, because a command
-is the widest blast radius:
-
-- The worker runs a command only by matching an entry **exactly**. It cannot add
-  an argument, cannot chain, cannot invent one. You wrote the whole command line.
-  The worker only chooses which to run.
-- There is no shell. The command is split to an argument list and run directly,
-  so `;`, `|`, `>`, globs, and `&&` are not interpreted. An entry like
-  `echo a; echo b` prints that literal string. It does not run two commands.
-- Commands run in a granted write dir with a scrubbed environment, so the worker
-  cannot read ambient secrets out of your shell or hijack a command through an
-  environment variable.
-- The fence governs **which** command and **where**, not what the command does.
-  Approve `rm -rf .` and it will delete the contents of the write dir you gave
-  it. The safety is that you write the command, not the worker. Approve only
-  commands you would run yourself.
 
 ## Development
 

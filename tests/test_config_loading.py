@@ -11,6 +11,8 @@ from strata_mcp.errors import (
     ConfigFileNotFoundError,
     ConfigParseError,
     ConfigValidationError,
+    MissingApiKeyForProviderError,
+    UnknownProviderError,
 )
 
 
@@ -44,6 +46,7 @@ def test_loads_minimal_toml_with_defaults(tmp_path: Path) -> None:
 
     config = load_config(path)
 
+    assert config.provider == "strata"
     assert config.base_url == "http://127.0.0.1:8080/v1"
     assert config.max_runtime_s is None
     assert config.api_key is None
@@ -56,6 +59,22 @@ def test_loads_temperature_from_toml(tmp_path: Path) -> None:
     config = load_config(path)
 
     assert config.temperature == 0.5
+
+
+def test_loads_provider_from_toml(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        """
+        provider = "opencode-go"
+        model_context_size = 8192
+        api_key = "secret"
+        """,
+    )
+
+    config = load_config(path)
+
+    assert config.provider == "opencode-go"
+    assert config.api_key == "secret"
 
 
 def test_missing_file_raises_not_found(tmp_path: Path) -> None:
@@ -92,4 +111,18 @@ def test_blank_base_url_raises_validation_error(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ConfigValidationError):
+        load_config(path)
+
+
+def test_unknown_provider_in_toml_raises_error(tmp_path: Path) -> None:
+    path = _write(tmp_path, 'provider = "unknown"\nmodel_context_size = 4096\n')
+
+    with pytest.raises(UnknownProviderError):
+        load_config(path)
+
+
+def test_opencode_go_without_key_in_toml_raises_error(tmp_path: Path) -> None:
+    path = _write(tmp_path, 'provider = "opencode-go"\nmodel_context_size = 4096\n')
+
+    with pytest.raises(MissingApiKeyForProviderError):
         load_config(path)

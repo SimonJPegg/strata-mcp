@@ -11,11 +11,20 @@ from strata_mcp.config import StrataConfig
 def test_minimal_config_applies_defaults() -> None:
     config = StrataConfig(model_context_size=32768)
 
+    assert config.provider == "strata"
     assert config.base_url == "http://127.0.0.1:8080/v1"
     assert config.model_context_size == 32768
     assert config.max_runtime_s is None
     assert config.api_key is None
     assert config.temperature == 0.0
+
+
+@pytest.mark.parametrize("provider", ["strata", "ollama", "opencode-go"])
+def test_each_provider_loads(provider: str) -> None:
+    api_key = "key" if provider == "opencode-go" else None
+    config = StrataConfig(model_context_size=4096, provider=provider, api_key=api_key)
+
+    assert config.provider == provider
 
 
 @pytest.mark.parametrize("bad_temp", [-0.1, 2.1, 5.0])
@@ -66,3 +75,23 @@ def test_blank_base_url_is_rejected() -> None:
 def test_non_positive_max_runtime_is_rejected(bad_runtime: float) -> None:
     with pytest.raises(ValidationError):
         StrataConfig(model_context_size=4096, max_runtime_s=bad_runtime)
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [("strata", "http://127.0.0.1:8080/v1"), ("ollama", "http://127.0.0.1:11434/v1")],
+)
+def test_endpoint_resolves_provider_default(provider: str, expected: str) -> None:
+    assert StrataConfig(model_context_size=4096, provider=provider).endpoint == expected
+
+
+def test_endpoint_prefers_explicit_base_url() -> None:
+    config = StrataConfig(base_url="http://10.0.0.5:9000/v1/", model_context_size=4096)
+
+    assert config.endpoint == "http://10.0.0.5:9000/v1"
+
+
+def test_explicit_null_base_url_falls_back_to_provider_default() -> None:
+    config = StrataConfig(base_url=None, model_context_size=4096)
+
+    assert config.base_url == "http://127.0.0.1:8080/v1"

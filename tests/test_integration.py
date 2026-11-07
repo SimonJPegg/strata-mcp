@@ -27,7 +27,8 @@ import pytest
 from strata_mcp.client import StrataClient
 from strata_mcp.config import StrataConfig
 from strata_mcp.delegation import run_delegation
-from strata_mcp.result import ReasoningEffort, WorkerStatus
+from strata_mcp.providers import DiscoveredModel
+from strata_mcp.result import WorkerStatus
 from strata_mcp.server import delegate_task_impl, list_models_impl
 from strata_mcp.tools import make_dispatch
 
@@ -63,12 +64,12 @@ def _client(config: StrataConfig) -> StrataClient:
     return StrataClient(config, httpx.Client(timeout=None))
 
 
-def test_model_discovery_returns_real_ids() -> None:
+def test_model_discovery_returns_real_models() -> None:
     models = _client(_config()).discover_models()
 
     assert isinstance(models, list)
     assert models
-    assert all(isinstance(m, str) and m for m in models)
+    assert all(isinstance(m, DiscoveredModel) and m.id for m in models)
 
 
 def test_delegation_returns_a_valid_envelope() -> None:
@@ -160,10 +161,10 @@ def test_list_models_and_explicit_model_delegation() -> None:
         http.close()
 
     assert models  # at least one model reported
-    assert all(isinstance(m, str) and m for m in models)
+    assert all(isinstance(m, DiscoveredModel) and m.id for m in models)
 
     # Delegate with an explicit model id taken from the live list.
-    response = delegate_task_impl(config, task="Reply with: ok", context="", model=models[0])
+    response = delegate_task_impl(config, task="Reply with: ok", context="", model=models[0].id)
 
     assert response.result.status is not WorkerStatus.ERROR
     assert response.result.output.strip() != ""
@@ -174,9 +175,7 @@ def test_reasoning_effort_none_reduces_tokens() -> None:
     task = "What is 17 + 25? Answer with just the number."
 
     default = delegate_task_impl(config, task=task, context="")
-    no_think = delegate_task_impl(
-        config, task=task, context="", reasoning_effort=ReasoningEffort.NONE
-    )
+    no_think = delegate_task_impl(config, task=task, context="", reasoning_effort="none")
 
     assert default.result.token_usage is not None
     assert no_think.result.token_usage is not None

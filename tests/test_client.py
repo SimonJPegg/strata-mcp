@@ -16,15 +16,36 @@ from strata_mcp.errors import (
     ModelDiscoveryError,
     StrataUnreachableError,
 )
+from strata_mcp.providers import (
+    DiscoveredModel,
+    ReasoningProvenance,
+    provider_headers,
+    server_user_agent,
+)
 
 
 def _client(
     handler: Callable[[httpx.Request], httpx.Response],
     api_key: str | None = None,
+    provider: str = "strata",
+    session_id: str | None = None,
 ) -> StrataClient:
-    config = StrataConfig(model_context_size=4096, api_key=api_key)
+    kwargs: dict[str, Any] = {"model_context_size": 4096, "api_key": api_key}
+    if provider == "opencode-go":
+        kwargs["api_key"] = api_key or "go-key"
+    config = StrataConfig(provider=provider, **kwargs)
+    headers = provider_headers(provider, session_id)
     transport = httpx.MockTransport(handler)
-    return StrataClient(config, httpx.Client(transport=transport))
+    return StrataClient(config, httpx.Client(transport=transport), headers=headers)
+
+
+def _assumed_entry(model_id: str) -> DiscoveredModel:
+    return DiscoveredModel(
+        id=model_id,
+        reasoning_levels=["none", "low", "medium", "high"],
+        reasoning_default=None,
+        reasoning_provenance=ReasoningProvenance.ASSUMED,
+    )
 
 
 def test_discover_models_returns_all_listed_ids() -> None:
@@ -33,14 +54,76 @@ def test_discover_models_returns_all_listed_ids() -> None:
         assert request.method == "GET"
         return httpx.Response(200, json={"data": [{"id": "qwen3-flash"}, {"id": "other"}]})
 
-    assert _client(handler).discover_models() == ["qwen3-flash", "other"]
+    models = _client(handler).discover_models()
+
+    assert [m.id for m in models] == ["qwen3-flash", "other"]
+    assert models == [_assumed_entry("qwen3-flash"), _assumed_entry("other")]
 
 
 def test_discover_models_single_model() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"id": "only-one"}]})
 
-    assert _client(handler).discover_models() == ["only-one"]
+    models = _client(handler).discover_models()
+
+    assert models == [_assumed_entry("only-one")]
+
+
+def test_discover_models_parses_go_advertised_levels() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "glm-5.3",
+                        "capabilities": {
+                            "reasoning": {
+                                "supported": True,
+                                "effort": ["low", "high", "max"],
+                                "default": {"type": "effort", "value": "high"},
+                            },
+                        },
+                    },
+                ],
+            },
+        )
+
+    models = _client(handler, provider="opencode-go").discover_models()
+
+    assert models == [
+        DiscoveredModel(
+            id="glm-5.3",
+            reasoning_levels=["low", "high", "max"],
+            reasoning_default="high",
+            reasoning_provenance=ReasoningProvenance.ADVERTISED,
+        ),
+    ]
+
+
+def test_discover_models_degrades_malformed_go_capabilities() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "broken",
+                        "capabilities": {
+                            "reasoning": {
+                                "supported": True,
+                                "effort": "high",  # not a list
+                            },
+                        },
+                    },
+                ],
+            },
+        )
+
+    models = _client(handler, provider="opencode-go").discover_models()
+
+    assert models[0].id == "broken"
+    assert models[0].reasoning_provenance == ReasoningProvenance.ASSUMED
 
 
 def test_requests_omit_auth_header_without_key() -> None:
@@ -260,3 +343,77 @@ def test_completion_ignores_unusable_usage(usage: Any) -> None:
 
     assert result.output == "answer"
     assert result.token_usage is None
+
+
+def test_user_agent_is_sent_on_every_request() -> None:
+    seen: set[str] = set()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.add(request.url.path)
+        assert request.headers["User-Agent"] == server_user_agent()
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    client = _client(handler)
+    client.discover_models()
+    client.complete("m", "sys", "q")
+
+    assert "/v1/models" in seen
+    assert "/v1/chat/completions" in seen
+
+
+def test_session_header_is_stable_for_go_and_absent_for_strata() -> None:
+    go_sessions: list[str] = []
+
+    def go_handler(request: httpx.Request) -> httpx.Response:
+        go_sessions.append(request.headers.get("x-opencode-session", ""))
+        return httpx.Response(200, json={"data": [{"id": "m"}]})
+
+    go_client = _client(go_handler, provider="opencode-go", session_id="session-abc")
+    go_client.discover_models()
+    go_client.discover_models()
+
+    assert go_sessions == ["session-abc", "session-abc"]
+
+    def strata_handler(request: httpx.Request) -> httpx.Response:
+        assert "x-opencode-session" not in request.headers
+        return httpx.Response(200, json={"data": [{"id": "m"}]})
+
+    _client(strata_handler).discover_models()
+
+
+def test_completion_bad_status_error_carries_the_response_body() -> None:
+    # The body holds the backend's reason (e.g. a region block); dropping it
+    # makes a 400 look like a payload bug.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "model blocked in region"}})
+
+    with pytest.raises(CompletionResponseError, match=r"HTTP 400.*model blocked in region"):
+        _client(handler).complete("m", "sys", "q")
+
+
+def test_discovery_bad_status_error_carries_the_response_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="key required")
+
+    with pytest.raises(ModelDiscoveryError, match=r"HTTP 401: key required"):
+        _client(handler).discover_models()
+
+
+def test_bad_status_with_empty_body_reports_status_only() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502)
+
+    with pytest.raises(CompletionResponseError, match=r"HTTP 502$"):
+        _client(handler).complete("m", "sys", "q")
+
+
+def test_oversized_error_body_is_truncated() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, text="x" * 5000)
+
+    with pytest.raises(CompletionResponseError) as excinfo:
+        _client(handler).complete("m", "sys", "q")
+
+    assert len(str(excinfo.value)) < 400

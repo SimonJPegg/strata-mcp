@@ -19,7 +19,7 @@ from strata_mcp.errors import (
 )
 from strata_mcp.mapping import error_result, status_from_output
 from strata_mcp.prompt import build_system_prompt
-from strata_mcp.result import ReasoningEffort, WorkerResult, WorkerStatus
+from strata_mcp.result import WorkerResult, WorkerStatus
 from strata_mcp.tools import build_tools, make_dispatch
 
 # Heartbeat cadence for the in-flight log line. A module constant would be a
@@ -108,10 +108,10 @@ def _run_with_heartbeat(
 
 
 def _chosen_model(client: StrataClient, model: str | None) -> str:
-    """Use the caller's chosen model, else the first model Strata advertises."""
+    """Use the caller's chosen model, else the first model the backend advertises."""
     if model:
         return model
-    return client.discover_models()[0]
+    return client.discover_models()[0].id
 
 
 def _text_worker_result(
@@ -170,7 +170,7 @@ def run_delegation(
     task: str,
     context: str,
     model: str | None = None,
-    reasoning_effort: ReasoningEffort | None = None,
+    reasoning_effort: str | None = None,
     read_dirs_allowed: list[str] | None = None,
     write_dirs_allowed: list[str] | None = None,
     max_tool_rounds: int = _DEFAULT_MAX_TOOL_ROUNDS,
@@ -178,7 +178,7 @@ def run_delegation(
     max_command_timeout_s: int = _DEFAULT_MAX_COMMAND_TIMEOUT_S,
     heartbeat_s: float = _DEFAULT_HEARTBEAT_S,
 ) -> WorkerResult:
-    """Delegate one task to the Strata worker and return a structured result.
+    """Delegate one task to the configured backend worker and return a structured result.
 
     Guards oversized context, selects the model, and runs the worker. When the
     caller grants file directories or a command menu, the worker runs a bounded
@@ -213,7 +213,7 @@ def run_delegation(
 
     def _work() -> WorkerResult:
         chosen = _chosen_model(client, model)
-        effort = reasoning_effort.value if reasoning_effort else None
+        effort = reasoning_effort
         tools = build_tools(read_dirs, write_dirs, commands)
         if not tools:
             return _text_worker_result(client, chosen, system_prompt, user_content, effort)

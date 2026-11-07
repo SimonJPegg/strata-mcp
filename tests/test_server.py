@@ -12,7 +12,8 @@ import pytest
 import strata_mcp.server as server_mod
 from strata_mcp.config import StrataConfig
 from strata_mcp.mapping import MARKER_COMPLETED
-from strata_mcp.result import ReasoningEffort, WorkerStatus
+from strata_mcp.providers import DiscoveredModel, ReasoningProvenance
+from strata_mcp.result import WorkerStatus
 from strata_mcp.server import build_server, delegate_task_impl, list_models_impl
 
 
@@ -72,12 +73,27 @@ def test_tool_descriptions_are_dense() -> None:
         assert len(desc) < 200
 
 
-def test_list_models_impl_returns_ids() -> None:
+def test_list_models_impl_returns_entries() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"data": [{"id": "a"}, {"id": "b"}]})
 
     http_client = httpx.Client(transport=httpx.MockTransport(handler))
-    assert list_models_impl(StrataConfig(model_context_size=4096), http_client) == ["a", "b"]
+    models = list_models_impl(StrataConfig(model_context_size=4096), http_client)
+
+    assert models == [
+        DiscoveredModel(
+            id="a",
+            reasoning_levels=["none", "low", "medium", "high"],
+            reasoning_default=None,
+            reasoning_provenance=ReasoningProvenance.ASSUMED,
+        ),
+        DiscoveredModel(
+            id="b",
+            reasoning_levels=["none", "low", "medium", "high"],
+            reasoning_default=None,
+            reasoning_provenance=ReasoningProvenance.ASSUMED,
+        ),
+    ]
 
 
 def test_chosen_model_is_used() -> None:
@@ -140,11 +156,35 @@ def test_reasoning_effort_reaches_request_when_set() -> None:
         StrataConfig(model_context_size=4096),
         task="t",
         context="",
-        reasoning_effort=ReasoningEffort.NONE,
+        reasoning_effort="none",
         http_client=http_client,
     )
 
     assert seen["effort"] == "none"
+
+
+def test_reasoning_effort_arbitrary_string_reaches_request() -> None:
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        body = json_mod.loads(request.content)
+        seen["effort"] = body.get("reasoning_effort", "<absent>")
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": f"ok\n{MARKER_COMPLETED}"}}]}
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    delegate_task_impl(
+        StrataConfig(model_context_size=4096),
+        task="t",
+        context="",
+        reasoning_effort="xhigh",
+        http_client=http_client,
+    )
+
+    assert seen["effort"] == "xhigh"
 
 
 def test_reasoning_effort_absent_when_omitted() -> None:
@@ -165,6 +205,25 @@ def test_reasoning_effort_absent_when_omitted() -> None:
     )
 
     assert seen["effort"] == "<absent>"
+
+
+def test_rejected_reasoning_level_returns_structured_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "m"}]})
+        return httpx.Response(400, json={"error": "reasoning_effort not supported"})
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = delegate_task_impl(
+        StrataConfig(model_context_size=4096),
+        task="t",
+        context="",
+        reasoning_effort="xhigh",
+        http_client=http_client,
+    )
+
+    assert response.result.status is WorkerStatus.ERROR
+    assert response.result.error is not None
 
 
 def test_constructed_client_timeout_derives_from_backstop(
