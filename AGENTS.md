@@ -37,7 +37,8 @@ All three must pass. Fix what you touched; do not disable rules to go green.
 ## Module layout (`src/strata_mcp/`)
 
 - `config.py` — `StrataConfig` model and `load_config()` (TOML via `tomllib`)
-- `client.py` — httpx client for Strata's OpenAI-compatible API
+- `providers.py` — provider profiles and capability parsing for each backend
+- `client.py` — httpx client for the configured backend's OpenAI-compatible API
 - `result.py` — `WorkerResult` envelope and `WorkerStatus`
 - `mapping.py` — self-report markers and output/error → status mapping
 - `prompt.py` — the worker system prompt

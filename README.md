@@ -59,10 +59,15 @@ The server reads a TOML config file, discovered in this order:
 
 ```toml
 # ~/.config/strata-mcp/config.toml  (or the path in STRATA_MCP_CONFIG)
-# Strata's OpenAI-compatible base URL (default shown).
-base_url = "http://127.0.0.1:8080/v1"
+# Backend provider. Each provider brings its own default base URL and required
+# request headers. Allowed values: strata | ollama | opencode-go.
+provider = "strata"
 
-# The context length Strata was launched with (its --context value).
+# The provider's OpenAI-compatible base URL (default shown for strata).
+# Override only if your backend listens elsewhere.
+# base_url = "http://127.0.0.1:8080/v1"
+
+# The context length the loaded model was launched with.
 # Surfaced to the caller so it can budget how much to send. Advisory.
 model_context_size = 32768
 
@@ -74,12 +79,13 @@ model_context_size = 32768
 # guarantee identical output on MoE models, whose expert routing still varies.
 # temperature = 0.0
 
-# Required only when Strata runs with a key (its /health reports
-# "api_key": true, and /v1/models returns 401 without one).
-# api_key = "your-strata-api-key"
+# Required for opencode-go, and only when Strata runs with a key
+# (its /health reports "api_key": true, and /v1/models returns 401 without one).
+# api_key = "your-api-key"
 ```
 
 The model id is discovered from `GET /v1/models`. You do not configure it.
+`provider` defaults to `strata`, so existing config files keep working.
 
 ## Run
 
@@ -152,18 +158,22 @@ delegate_task(task: str, context: str = "", model: str | None = None, reasoning_
   resource. Send the minimum.
 - `model` — optional model id (see `list_models`). Omitted, the first model the
   engine reports is used.
-- `reasoning_effort` — optional, one of `none | low | medium | high`. One
-  thinking control across backends: Strata and Ollama both honour
-  `reasoning_effort` on the OpenAI-compatible endpoint, and `none` turns the
-  reasoning phase off for fast bounded tasks. Omitted, the backend default
-  applies (thinking on). It is best-effort and depends on the model. Some ignore
-  the levels, and this Qwen treats `low` and `medium` the same.
+- `reasoning_effort` — optional reasoning level taken from the chosen model's
+  entry in `list_models`. The value is passed through to the backend unchanged.
+  Omitted, the backend default applies. If the backend rejects the level, the
+  result has `status: error` and a descriptive message so you can retry with a
+  different level.
 
-  > Note: best-effort does not mean safe to send blind. A model with no thinking
-  > phase can reject any `reasoning_effort` outright. Ollama's `Qwen3-Coder`
-  > answers a plain call fine but 400s on `reasoning_effort`, and that comes back
-  > as a `status: error` result, not a silent fallback. Send it only to a model
-  > you know thinks, or leave it off.
+  > Note: this used to be a closed enum (`none | low | medium | high`). It is now
+  > discovery-driven because different models advertise different ladders (for
+  > example, OpenCode Go models may offer `minimal`, `xhigh`, or `max`). Call
+  > `list_models` first and pick a level the model actually accepts.
+  > `reasoning_effort` without `model` applies to the first model in the list,
+  > which may not advertise that level.
+
+  > Some backends silently clamp a level rather than reject it, so a requested
+  > `max` may run as `high`. The result envelope does not echo the applied level;
+  > treat reasoning control as best-effort.
 
 The response carries:
 
@@ -175,22 +185,36 @@ The response carries:
 ## The `list_models` tool
 
 ```
-list_models() -> list[str]
+list_models() -> list[{
+  id: str,
+  reasoning_levels: list[str],
+  reasoning_default: str | None,
+  reasoning_provenance: "advertised" | "assumed"
+}]
 ```
 
-Returns the model ids the engine reports from `/v1/models`, so the caller can
-pick one for `delegate_task`. Strata serves one model, so you get one id. Ollama
-serves many, so you get the lot and choose.
+Returns the models the engine reports from `/v1/models`, so the caller can pick
+one and a reasoning level for `delegate_task`. Each entry carries:
+
+- `id` — the model identifier to pass to `delegate_task(model=...)`.
+- `reasoning_levels` — the levels the model accepts for `reasoning_effort`.
+- `reasoning_default` — the backend's advertised default level, when it declares one.
+- `reasoning_provenance` — `advertised` when the levels came from the backend's
+  metadata, or `assumed` when they are the provider's fallback set (Strata and
+  Ollama do not advertise per-model reasoning ladders, so they use the fallback
+  `none | low | medium | high`).
+
+Raw provider metadata (costs, modalities, SDK hints) is trimmed away so the
+response stays small in the caller's context.
 
 ### A note on `model_context_size`
 
 `model_context_size` is one value you set in config. The server does not read it
 per model from the engine, on purpose. The OpenAI-compatible `/v1/models`
-endpoint does not reliably report context length. Strata gives it, Ollama does
-not and will silently truncate to an internal default. So the operator declares
-one advisory window that matches how the engine was launched. Pick a model whose
-real window differs and the configured value is still what gets surfaced and used
-for the oversized-context guard.
+endpoint does not reliably report context length across providers. So the
+operator declares one advisory window that matches how the engine was launched.
+Pick a model whose real window differs and the configured value is still what
+gets surfaced and used for the oversized-context guard.
 
 ### Result status
 

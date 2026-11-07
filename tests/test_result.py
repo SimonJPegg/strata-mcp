@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from strata_mcp.result import ReasoningEffort, WorkerResult, WorkerStatus
+from strata_mcp.result import WorkerResult, WorkerStatus
 
 
 def test_ok_result_carries_output() -> None:
@@ -48,13 +48,3 @@ def test_status_serialises_to_string_value() -> None:
     result = WorkerResult(status=WorkerStatus.NEEDS_INPUT, output="which file?")
 
     assert result.model_dump()["status"] == "needs_input"
-
-
-def test_reasoning_effort_rejects_invalid_value() -> None:
-    with pytest.raises(ValueError):
-        ReasoningEffort("extreme")
-
-
-def test_reasoning_effort_accepts_valid_values() -> None:
-    assert ReasoningEffort("none") is ReasoningEffort.NONE
-    assert ReasoningEffort("high") is ReasoningEffort.HIGH

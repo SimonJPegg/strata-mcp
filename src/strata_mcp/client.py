@@ -15,6 +15,12 @@ from strata_mcp.errors import (
     ModelDiscoveryError,
     StrataUnreachableError,
 )
+from strata_mcp.providers import (
+    DiscoveredModel,
+    ReasoningProvenance,
+    parse_reasoning,
+    provider_profile,
+)
 
 
 class TokenUsage(BaseModel):
@@ -73,34 +79,55 @@ def _auth_headers(api_key: str | None) -> dict[str, str]:
     return {}
 
 
+def _request_headers(api_key: str | None, extra: dict[str, str]) -> dict[str, str]:
+    """Merge provider-required headers with any auth header."""
+    headers = dict(extra)
+    headers.update(_auth_headers(api_key))
+    return headers
+
+
+def _status_detail(exc: httpx.HTTPStatusError, limit: int = 300) -> str:
+    """Describe a bad-status response with its body, which carries the backend's reason."""
+    status = f"HTTP {exc.response.status_code}"
+    body = exc.response.text.strip()[:limit]
+    return f"{status}: {body}" if body else status
+
+
 class StrataClient:
-    """Reaches a local Strata server over its OpenAI-compatible API.
+    """Reaches the configured backend over its OpenAI-compatible API.
 
     Exists to isolate all HTTP concerns so the delegation tool stays pure
     orchestration and failures map to typed errors rather than leaking.
     """
 
-    def __init__(self, config: StrataConfig, client: httpx.Client) -> None:
+    def __init__(
+        self,
+        config: StrataConfig,
+        client: httpx.Client,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         # The httpx.Client is injected so tests can supply a MockTransport.
         self._config = config
         self._client = client
+        self._headers = headers or {}
 
-    def discover_models(self) -> list[str]:
-        """Return all available model ids from GET /v1/models, in order."""
-        return _all_model_ids(self._get_models())
+    def discover_models(self) -> list[DiscoveredModel]:
+        """Return all available models from GET /v1/models, with reasoning hints."""
+        return _all_models(self._get_models(), self._config.provider)
 
     def _get_models(self) -> httpx.Response:
         """GET /v1/models, mapping a bad status and an unreachable server to typed errors."""
+        base_url = self._config.endpoint
         try:
             response = self._client.get(
-                f"{self._config.base_url}/models",
-                headers=_auth_headers(self._config.api_key),
+                f"{base_url}/models",
+                headers=_request_headers(self._config.api_key, self._headers),
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise ModelDiscoveryError(exc) from exc
+            raise ModelDiscoveryError(_status_detail(exc)) from exc
         except httpx.HTTPError as exc:
-            raise StrataUnreachableError(self._config.base_url) from exc
+            raise StrataUnreachableError(base_url) from exc
         return response
 
     def complete(
@@ -122,17 +149,18 @@ class StrataClient:
 
     def _post_completion(self, payload: WireObject) -> httpx.Response:
         """POST one chat completion, mapping a transport failure to a typed error."""
+        base_url = self._config.endpoint
         try:
             response = self._client.post(
-                f"{self._config.base_url}/chat/completions",
-                headers=_auth_headers(self._config.api_key),
+                f"{base_url}/chat/completions",
+                headers=_request_headers(self._config.api_key, self._headers),
                 json=payload,
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise CompletionResponseError(exc) from exc
+            raise CompletionResponseError(_status_detail(exc)) from exc
         except httpx.HTTPError as exc:
-            raise StrataUnreachableError(self._config.base_url) from exc
+            raise StrataUnreachableError(base_url) from exc
         return response
 
     def complete_with_tools(
@@ -319,9 +347,28 @@ def _record_effect(
         commands_run.append(effect.command_run)
 
 
-def _all_model_ids(response: httpx.Response) -> list[str]:
-    """Extract all model ids from a /v1/models body, in order."""
-    return [_model_id(entry) for entry in _model_entries(response)]
+def _all_models(response: httpx.Response, provider: str) -> list[DiscoveredModel]:
+    """Extract all models from a /v1/models body, in order, with reasoning hints."""
+    return [_discovered_model(entry, provider) for entry in _model_entries(response)]
+
+
+def _discovered_model(entry: object, provider: str) -> DiscoveredModel:
+    """Build one discovered model entry, degrading unparseable reasoning metadata."""
+    model_id = _model_id(entry)
+    levels, default_level = parse_reasoning(provider, entry)
+    if levels is None:
+        profile = provider_profile(provider)
+        levels = profile.fallback_reasoning_levels
+        default_level = None
+        provenance = ReasoningProvenance.ASSUMED
+    else:
+        provenance = ReasoningProvenance.ADVERTISED
+    return DiscoveredModel(
+        id=model_id,
+        reasoning_levels=levels,
+        reasoning_default=default_level,
+        reasoning_provenance=provenance,
+    )
 
 
 def _model_entries(response: httpx.Response) -> list[object]:

@@ -22,9 +22,11 @@ take the work back by reflex: re-delegate with a widened fence (add the suggeste
 command, grant the needed dir) or a bounded diagnosis task ("find why X fails") —
 diagnosis delegates too. Step in only for what no fence can reach (network,
 secrets the scrubbed env lacks), and open only as narrowly as the fix needs. Let
-the worker reason by default; set `reasoning_effort=none` only for mechanical
-one-shape tasks (rename, reformat, find-replace) — when unsure leave it on, since
-needless thinking is merely slow but missing thinking is a wrong answer you pay
-to fix. Check `list_models`: a stronger model lets you spec looser and keep less.
+the worker reason by default; Before setting a level, call `list_models` and pick `reasoning_effort` from the
+chosen model's advertised `reasoning_levels`; for mechanical one-shape tasks
+(rename, reformat, find-replace) use the smallest level, or omit it entirely.
+When unsure leave thinking on, since needless thinking is merely slow but missing
+thinking is a wrong answer you pay to fix. Check `list_models`: a stronger model
+lets you spec looser and keep less.
 Final judgement is yours; never trust the worker's self-reported status — the
 quant will claim it checked when it didn't.

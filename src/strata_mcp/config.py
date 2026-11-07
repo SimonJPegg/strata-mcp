@@ -1,29 +1,36 @@
-"""Configuration model for the Strata connection and delegation limits."""
+"""Configuration model for the backend connection and delegation limits."""
 
 from __future__ import annotations
 
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from strata_mcp.errors import (
     BlankBaseUrlError,
     ConfigFileNotFoundError,
     ConfigParseError,
     ConfigValidationError,
+    MissingApiKeyForProviderError,
+    UnknownProviderError,
 )
+from strata_mcp.providers import known_providers, provider_profile
 
 
 class StrataConfig(BaseModel):
-    """Connection settings and limits for reaching a local Strata server.
+    """Connection settings and limits for reaching the configured backend.
 
     Exists so connection details live in config, not tool parameters, keeping
     the worker's attention on the task rather than on plumbing.
     """
 
-    # Strata's default OpenAI-compatible address; overridable per deployment.
-    base_url: str = Field(default="http://127.0.0.1:8080/v1")
+    # The backend provider. Selects defaults, required headers, and how
+    # capabilities are parsed from the model-listing endpoint.
+    provider: str = Field(default="strata")
+    # The provider's OpenAI-compatible base URL; defaults to the provider's
+    # own local address and is overridable per deployment.
+    base_url: str | None = Field(default=None)
     # Context length Strata was launched with (--context). Advisory budget the
     # server surfaces to the caller; see the oversized-context backstop.
     model_context_size: int = Field(gt=0)
@@ -39,11 +46,42 @@ class StrataConfig(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def _base_url_not_blank(cls, value: str) -> str:
-        """Reject a blank base_url early; a blank URL cannot reach Strata."""
+    def _base_url_not_blank(cls, value: str | None) -> str | None:
+        """Reject a blank base_url early; a blank URL cannot reach the backend."""
+        if value is None:
+            return None
         if not value.strip():
             raise BlankBaseUrlError
         return value.rstrip("/")
+
+    @field_validator("provider")
+    @classmethod
+    def _provider_is_known(cls, value: str) -> str:
+        """Reject an unknown provider early; only configured dialects can be loaded."""
+        if value not in known_providers():
+            raise UnknownProviderError(value)
+        return value
+
+    @property
+    def endpoint(self) -> str:
+        """Return the effective base URL, so callers never handle the unset case."""
+        if self.base_url is not None:
+            return self.base_url
+        return provider_profile(self.provider).default_base_url.rstrip("/")
+
+    @model_validator(mode="after")
+    def _apply_provider_defaults(self) -> StrataConfig:
+        """Apply provider-specific defaults when the operator did not override them."""
+        if self.base_url is None:
+            self.base_url = self.endpoint
+        return self
+
+    @model_validator(mode="after")
+    def _provider_requires_api_key(self) -> StrataConfig:
+        """Providers that always require a key must have one configured."""
+        if self.provider == "opencode-go" and not self.api_key:
+            raise MissingApiKeyForProviderError(self.provider)
+        return self
 
 
 def load_config(path: Path) -> StrataConfig:
@@ -63,4 +101,13 @@ def load_config(path: Path) -> StrataConfig:
     try:
         return StrataConfig.model_validate(raw)
     except ValidationError as exc:
+        for error in exc.errors():
+            # Pydantic wraps validator exceptions in ctx; these two stay
+            # specific for callers. Blank base_url deliberately stays wrapped.
+            original = error.get("ctx", {}).get("error")
+            if isinstance(
+                original,
+                (MissingApiKeyForProviderError, UnknownProviderError),
+            ):
+                raise original from exc
         raise ConfigValidationError(str(path), str(exc)) from exc

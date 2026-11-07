@@ -24,19 +24,6 @@ class WorkerStatus(StrEnum):
     ERROR = "error"
 
 
-class ReasoningEffort(StrEnum):
-    """Unified thinking control honoured by Strata and Ollama (/v1 endpoint).
-
-    NONE turns the reasoning phase off; LOW/MEDIUM/HIGH dial it. Best-effort:
-    some models ignore levels or collapse them.
-    """
-
-    NONE = "none"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-
 class WorkerResult(BaseModel):
     """Every delegation outcome as data, so failures never surface as raises."""
 

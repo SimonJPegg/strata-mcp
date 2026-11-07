@@ -35,6 +35,22 @@ class ConfigValidationError(ConfigError):
         super().__init__(f"invalid config in {path}: {detail}")
 
 
+class UnknownProviderError(ConfigError):
+    """Raised when the configured provider is not one the server knows."""
+
+    def __init__(self, provider: str) -> None:
+        super().__init__(
+            f"unknown provider: {provider!r}; expected one of strata, ollama, opencode-go"
+        )
+
+
+class MissingApiKeyForProviderError(ConfigError):
+    """Raised when a provider requires an API key but none is configured."""
+
+    def __init__(self, provider: str) -> None:
+        super().__init__(f"provider {provider!r} requires an api_key")
+
+
 class StrataClientError(Exception):
     """Base for failures talking to Strata, caught and mapped to results."""
 
